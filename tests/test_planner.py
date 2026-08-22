@@ -93,11 +93,30 @@ def test_a_vanished_todo_whose_reminder_is_also_gone_only_drops_the_mapping():
     assert actions[0].reminder_id is None
 
 
-def test_reminders_thingsync_cannot_prove_are_its_own_are_never_touched():
-    stranger = todo(uuid="HAND-MADE")
+def test_an_orphaned_marker_with_no_state_entry_and_no_open_todo_produces_no_action():
     actions = plan([], empty_state(), markers={"HAND-MADE": "R9"}, live_ids={"R9"})
 
     assert actions == []
+
+
+def test_reminders_thingsync_cannot_prove_are_its_own_are_never_touched():
+    # A hand-made reminder carries no marker at all, so a plan run alongside
+    # other, legitimately-marked reminders and a known state entry must never
+    # emit an action referencing a reminder id thingsync has no ownership
+    # evidence for.
+    state = State(
+        target_list="Things",
+        items={"U1": StateEntry(reminder_id="R1", hash="h1")},
+    )
+    markers = {"U2": "R2"}
+    live_ids = {"R1", "R-HANDMADE"}
+
+    actions = plan([], state, markers, live_ids, on_done="delete")
+
+    evidence = {"R1", "R2"}
+    touched = {action.reminder_id for action in actions if action.reminder_id is not None}
+    assert touched <= evidence
+    assert "R-HANDMADE" not in touched
 
 
 def test_todos_may_be_any_iterable_not_only_a_list():
