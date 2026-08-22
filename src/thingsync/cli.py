@@ -183,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(lines))
         return code
 
+    from thingsync.reminders_sink import RemindersError
     from thingsync.state import StateError
 
     try:
@@ -192,6 +193,9 @@ def main(argv: list[str] | None = None) -> int:
             return rebuild_state_command(args)
     except StateError as error:
         print(f"State error: {error}", file=sys.stderr)
+        return 1
+    except RemindersError as error:
+        print(f"Reminders error: {error}", file=sys.stderr)
         return 1
 
     return 2

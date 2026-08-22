@@ -1,5 +1,6 @@
 import pytest
 
+from thingsync import cli
 from thingsync.cli import execute
 from thingsync.mapping import to_payload
 from thingsync.model import ThingsTodo
@@ -121,3 +122,17 @@ def test_wholesale_destruction_is_refused_without_yes():
 
 def test_yes_authorises_it():
     assert refusal_for_bulk_destruction(many_completions(500), assume_yes=True) is None
+
+
+def test_main_reports_a_denied_reminders_grant_without_a_traceback(monkeypatch, capsys):
+    from thingsync.reminders_sink import RemindersError
+
+    def boom(args):
+        raise RemindersError("Reminders access was not granted; run `thingsync doctor`")
+
+    monkeypatch.setattr(cli, "sync_command", boom)
+
+    code = cli.main(["sync"])
+
+    assert code == 1
+    assert "thingsync doctor" in capsys.readouterr().err
