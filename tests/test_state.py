@@ -34,6 +34,16 @@ def test_an_unparseable_state_file_is_a_hard_error_naming_the_repair(tmp_path):
     assert "rebuild-state" in str(raised.value)
 
 
+def test_a_non_utf8_state_file_is_also_a_hard_error(tmp_path):
+    path = tmp_path / "Things.json"
+    path.write_bytes(b"\x80\x81\x82")
+
+    with pytest.raises(StateError) as raised:
+        load(path, target_list="Things")
+
+    assert "rebuild-state" in str(raised.value)
+
+
 def test_a_structurally_wrong_state_file_is_also_a_hard_error(tmp_path):
     path = tmp_path / "Things.json"
     path.write_text('{"version": 1, "target_list": "Things"}', encoding="utf-8")

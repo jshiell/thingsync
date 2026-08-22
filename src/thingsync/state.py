@@ -92,7 +92,14 @@ def load(path: Path, target_list: str) -> State:
             uuid: StateEntry(reminder_id=entry["reminder_id"], hash=entry["hash"])
             for uuid, entry in document["items"].items()
         }
-    except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as error:
+    except (
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        UnicodeDecodeError,
+        OSError,
+    ) as error:
         raise StateError(f"{path} is not a readable thingsync state file ({error}); {REPAIR_HINT}") from error
 
     if version != VERSION:
