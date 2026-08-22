@@ -147,11 +147,13 @@ def sync_args(target_list="Things", dry_run=False, on_done="complete", yes=False
 def test_dry_run_writes_no_reminders_and_no_state_file(monkeypatch, tmp_path):
     state_file = tmp_path / "Things.json"
     monkeypatch.setattr(state_module, "state_path", lambda target_list: state_file)
-    monkeypatch.setattr(things_source, "load_todos", lambda: [ThingsTodo(uuid="U1", title="Buy milk")])
     sink = FakeSink()
     monkeypatch.setattr(cli, "_open_sink", lambda target_list: sink)
 
-    code = cli.sync_command(sync_args(dry_run=True))
+    code = cli.sync_command(
+        sync_args(dry_run=True),
+        source=lambda: [ThingsTodo(uuid="U1", title="Buy milk")],
+    )
 
     assert code == 0
     assert sink.calls == []

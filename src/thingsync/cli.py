@@ -8,7 +8,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable
 
 from thingsync.planner import ActionKind, SyncAction, destructive_actions
-from thingsync.protocols import ReminderSink
+from thingsync.protocols import ReminderSink, TodoSource
 from thingsync.state import State, StateEntry
 
 DEFAULT_LIST = "Things"
@@ -120,14 +120,16 @@ def _open_sink(target_list: str):
     return sink
 
 
-def sync_command(args) -> int:
+def sync_command(args, source: TodoSource | None = None) -> int:
     from thingsync.planner import plan
     from thingsync.state import load, save, state_path
-    from thingsync.things_source import load_todos
+
+    if source is None:
+        from thingsync.things_source import load_todos as source
 
     path = state_path(args.target_list)
     state = load(path, target_list=args.target_list)
-    todos = load_todos()
+    todos = source()
 
     sink = _open_sink(args.target_list)
     markers = sink.scan_markers()
