@@ -7,3 +7,4 @@ build/
 *.egg-info/
 .pythons/
 .state/
+plan.md.orig
