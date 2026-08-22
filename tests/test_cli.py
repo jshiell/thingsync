@@ -181,15 +181,19 @@ def test_bulk_destruction_refusal_stops_before_any_sink_write(monkeypatch, tmp_p
     assert sink.calls == []
 
 
-def test_main_reports_a_denied_reminders_grant_without_a_traceback(monkeypatch, capsys):
+@pytest.mark.parametrize("argv", [["sync"], ["rebuild-state"]])
+def test_main_reports_a_denied_reminders_grant_without_a_traceback(monkeypatch, capsys, tmp_path, argv):
     from thingsync.reminders_sink import RemindersError
 
-    def boom(args):
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(things_source, "load_todos", lambda: [])
+
+    def boom(target_list):
         raise RemindersError("Reminders access was not granted; run `thingsync doctor`")
 
-    monkeypatch.setattr(cli, "sync_command", boom)
+    monkeypatch.setattr(cli, "_open_sink", boom)
 
-    code = cli.main(["sync"])
+    code = cli.main(argv)
 
     assert code == 1
     assert "thingsync doctor" in capsys.readouterr().err
