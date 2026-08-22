@@ -77,3 +77,17 @@ def test_a_reminder_without_a_marker_is_invisible_to_the_scan(live_sink):
     live_sink._save(stranger)
 
     assert live_sink.scan_markers() == {}
+
+
+@pytest.mark.live
+def test_scanning_a_list_that_does_not_exist_does_not_create_it():
+    # --dry-run scans before it decides anything, so scanning must not write.
+    from thingsync.reminders_sink import RemindersSink
+
+    sink = RemindersSink("thingsync-absent-list")
+    sink.request_access()
+
+    assert sink.scan_markers() == {}
+
+    titles = [c.title() for c in sink._store.calendarsForEntityType_(1)]
+    assert "thingsync-absent-list" not in titles

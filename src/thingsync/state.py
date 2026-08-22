@@ -45,6 +45,12 @@ class State:
 
 
 DEFAULT_ROOT = Path.home() / ".local" / "state" / "thingsync"
+STATE_DIR_VARIABLE = "THINGSYNC_STATE_DIR"
+
+
+def state_root() -> Path:
+    """Where state files live, overridable for sandboxes and tests."""
+    return Path(os.environ.get(STATE_DIR_VARIABLE) or DEFAULT_ROOT)
 
 
 def state_path(target_list: str, root: Path | None = None) -> Path:
@@ -54,7 +60,7 @@ def state_path(target_list: str, root: Path | None = None) -> Path:
     one list leave mappings that a later run applies to a different one.
     """
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", target_list).strip("._-") or "default"
-    return (root or DEFAULT_ROOT) / f"{slug}.json"
+    return (root or state_root()) / f"{slug}.json"
 
 
 def save(path: Path, state: State) -> None:

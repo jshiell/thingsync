@@ -83,3 +83,15 @@ def test_a_list_name_cannot_escape_the_state_directory(tmp_path):
     path = state_path("../../etc/passwd", root=tmp_path)
 
     assert path.parent == tmp_path
+
+
+def test_the_state_directory_can_be_redirected(monkeypatch, tmp_path):
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path / "elsewhere"))
+
+    assert state_path("Things").parent == tmp_path / "elsewhere"
+
+
+def test_an_explicit_root_still_wins_over_the_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path / "ignored"))
+
+    assert state_path("Things", root=tmp_path).parent == tmp_path

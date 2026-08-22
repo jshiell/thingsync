@@ -86,8 +86,8 @@ class RemindersSink:
                 "run `thingsync doctor` for the specifics"
             )
 
-    def calendar(self):
-        """The target list, created if it does not exist yet."""
+    def find_calendar(self):
+        """The target list, or None if it does not exist. Never writes."""
         if self._calendar is not None:
             return self._calendar
 
@@ -97,6 +97,17 @@ class RemindersSink:
             if candidate.title() == self.target_list:
                 self._calendar = candidate
                 return candidate
+        return None
+
+    def calendar(self):
+        """The target list, created if it does not exist yet.
+
+        Only called on the first real write: ``--dry-run`` must not leave an
+        empty list behind as a side effect of looking.
+        """
+        existing = self.find_calendar()
+        if existing is not None:
+            return existing
 
         created = EventKit.EKCalendar.calendarForEntityType_eventStore_(
             EventKit.EKEntityTypeReminder, self._store
@@ -121,8 +132,13 @@ class RemindersSink:
         scanned: a reminder completed for a to-do that has since been reopened
         is deliberately left alone.
         """
+        calendar = self.find_calendar()
+        if calendar is None:
+            # Nothing mirrored yet, and looking must not create the list.
+            return {}
+
         predicate = self._store.predicateForIncompleteRemindersWithDueDateStarting_ending_calendars_(
-            None, None, [self.calendar()]
+            None, None, [calendar]
         )
         done = threading.Event()
         found: dict = {}
