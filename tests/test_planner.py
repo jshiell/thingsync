@@ -100,23 +100,21 @@ def test_an_orphaned_marker_with_no_state_entry_and_no_open_todo_produces_no_act
 
 
 def test_reminders_thingsync_cannot_prove_are_its_own_are_never_touched():
-    # A hand-made reminder carries no marker at all, so a plan run alongside
-    # other, legitimately-marked reminders and a known state entry must never
-    # emit an action referencing a reminder id thingsync has no ownership
-    # evidence for.
+    # The cached identifier R1 no longer resolves (rotated or hand-deleted),
+    # and no marker recovers it. A hand-made reminder is live on the list, but
+    # thingsync has no evidence it owns it, so it must never be guessed at —
+    # the mapping must simply be forgotten.
     state = State(
         target_list="Things",
         items={"U1": StateEntry(reminder_id="R1", hash="h1")},
     )
-    markers = {"U2": "R2"}
-    live_ids = {"R1", "R-HANDMADE"}
+    markers = {}
+    live_ids = {"R-HANDMADE"}
 
     actions = plan([], state, markers, live_ids, on_done="delete")
 
-    evidence = {"R1", "R2"}
-    touched = {action.reminder_id for action in actions if action.reminder_id is not None}
-    assert touched <= evidence
-    assert "R-HANDMADE" not in touched
+    assert kinds(actions) == [(ActionKind.FORGET, "U1")]
+    assert actions[0].reminder_id is None
 
 
 def test_todos_may_be_any_iterable_not_only_a_list():
