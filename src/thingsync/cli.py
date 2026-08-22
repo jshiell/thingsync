@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable
 
 from thingsync.planner import ActionKind, SyncAction, destructive_actions
+from thingsync.protocols import ReminderSink
 from thingsync.state import State, StateEntry
 
 DEFAULT_LIST = "Things"
@@ -38,7 +39,7 @@ def refusal_for_bulk_destruction(
 
 def execute(
     actions: Iterable[SyncAction],
-    sink,
+    sink: ReminderSink,
     state: State,
     persist: Callable[[State], None],
 ) -> Counter:
