@@ -1,0 +1,153 @@
+# thingsync — one-way mirror from Things 3 to Apple Reminders
+
+## Context
+
+Things 3 holds the authoritative task list, but Apple Reminders is what's reachable
+from Siri, Apple Watch, CarPlay and shared lists. There is no Things Cloud API, so any
+integration has to work locally on the Mac: read the Things SQLite database, write via
+EventKit.
+
+The goal is a **one-way mirror** — Things is the source of truth, Reminders is a
+reflection of it. All open to-dos are mirrored. It runs as a CLI, invoked manually.
+Edits made in Reminders are not read back and will be overwritten on the next run.
+
+The project directory `/Users/jsh/Projects/thingsync` is currently empty; this is
+greenfield, including `git init`.
+
+## Decisions taken
+
+| Decision | Choice |
+|---|---|
+| Direction | One-way, Things → Reminders. Reminders is disposable output. |
+| Scope | All open (incomplete, non-trashed) to-dos. |
+| Trigger | Manual CLI. No launchd agent yet — leave the door open for one. |
+| Stack | Python 3.12 via `uv`/`mise`; `things.py` to read, PyObjC EventKit to write. |
+
+## Architecture
+
+```
+thingsync/
+  pyproject.toml            # uv-managed, entry point `thingsync`
+  .mise.toml                # pins python + uv
+  src/thingsync/
+    cli.py                  # argparse: sync, doctor; --dry-run, --list, --on-done
+    things_source.py        # adapter over things.py -> list[ThingsTodo]
+    reminders_sink.py       # adapter over EventKit -> create/update/complete/lookup
+    model.py                # ThingsTodo, ReminderPayload, SyncAction dataclasses
+    mapping.py              # ThingsTodo -> ReminderPayload field mapping (pure)
+    planner.py              # (todos, state) -> [SyncAction]  (pure, the core)
+    state.py                # load/save JSON state store
+  tests/
+```
+
+The two adapters are the only macOS-touching code and sit behind narrow protocols
+(`TodoSource`, `ReminderSink`). `planner.py` and `mapping.py` are pure and carry the
+test weight; adapters are faked in unit tests.
+
+### State store
+
+`~/.local/state/thingsync/state.json`, one entry per mirrored to-do:
+
+```json
+{ "version": 1,
+  "items": { "<things-uuid>": { "reminder_id": "<calendarItemIdentifier>",
+                                "hash": "<sha256 of payload>",
+                                "list": "Things" } } }
+```
+
+The hash makes re-runs cheap and idempotent: unchanged to-dos are skipped entirely.
+
+**Safety rule, non-negotiable:** thingsync only ever touches reminders whose
+identifier appears in its own state file. Hand-made reminders are never modified or
+deleted, even in the target list.
+
+### Field mapping (`mapping.py`)
+
+| Things | Reminders |
+|---|---|
+| `title` | `title` |
+| `notes` | `notes` body |
+| project / area | breadcrumb line prepended to notes (`Area › Project`) |
+| `tags` | appended to notes as `#tag` text — EventKit does not expose Reminders tags |
+| `checklist` | appended to notes as `☐ item` lines — see limitations |
+| `deadline` | `dueDateComponents`, date-only (all-day) |
+| `start_date` (When) | `startDateComponents`, date-only, **no alarm** — avoids a notification storm on first run |
+| Inbox / Anytime / Someday | not mapped; everything lands in one list |
+
+### Sync algorithm (`planner.py`)
+
+For each open Things to-do:
+- not in state → **Create**
+- in state, hash changed → **Update** (look up by identifier; if the reminder is gone,
+  the user deleted it → recreate, since Things is the source of truth)
+- in state, hash unchanged → no-op
+
+For each state entry whose to-do is no longer open in Things (completed, cancelled,
+trashed, or vanished):
+- **Complete** the reminder and drop the mapping (default), or **Delete** it with
+  `--on-done delete`.
+
+`--dry-run` prints the action list and writes nothing. This is how the first run
+should always be done.
+
+## Permissions — the fiddly part
+
+Two separate macOS grants are needed, both attributed to the *host* process (your
+terminal), not to the script:
+
+1. **Full Disk Access** for the terminal — without it
+   `~/Library/Group Containers/JLMPQHK86H.com.culturedcode.ThingsMac/` is unreadable.
+   Confirmed in this session: the path returns `Operation not permitted` today.
+2. **Reminders access** — EventKit prompts on first use.
+   macOS 14+ requires `requestFullAccessToRemindersWithCompletion:`; the older
+   `requestAccessToEntityType:completion:` is deprecated on this machine (macOS 26.6).
+
+`thingsync doctor` checks both, prints exactly which System Settings pane to open, and
+exits non-zero if either is missing. Build this early — it saves debugging every
+confusing failure later as if it were a code bug.
+
+EventKit note: prefer `calendarItemWithIdentifier:` (synchronous) for updates, since
+identifiers come from the state file. Only the access request and any full-list fetch
+need the async completion-handler bridge.
+
+## Increments (TDD, one commit each)
+
+1. `git init`; uv/mise scaffold; `pytest` green with one trivial test.
+2. `model.py` + `mapping.py`: to-do → payload, incl. notes composition. Pure tests.
+3. `state.py`: load/save/round-trip, missing-file and version handling.
+4. `planner.py`: create / update / skip / complete decisions against a fake state.
+   This is the increment that deserves the most test cases.
+5. `things_source.py`: real `things.py` read → `ThingsTodo`. Test against a small
+   fixture database rather than the live one.
+6. `reminders_sink.py`: EventKit create/update/complete/lookup.
+7. `cli.py`: `sync --dry-run`, then real `sync`; `doctor`.
+8. `README.md`: permissions setup, usage, the "Reminders is disposable" contract.
+
+## Known limitations (state these in the README)
+
+- **Checklists** flatten into notes text. `EKReminder.parentReminder` exists but is
+  undocumented and best-effort; not worth the risk for a v1.
+- **Tags** become notes text — EventKit has no public tag API.
+- **Repeating to-dos** mirror as the single next instance, with no recurrence rule.
+- **Reminders-side edits are lost** on the next run. By design.
+- Things must have been launched at least once on this Mac for the database to exist.
+
+## Verification
+
+```sh
+uv run pytest                          # unit suite
+uv run thingsync doctor                # both permissions green
+uv run thingsync sync --dry-run        # inspect the action list, write nothing
+uv run thingsync sync --list Scratch   # real run into a throwaway list
+```
+
+Then, by hand:
+1. Open Reminders — the Scratch list matches the open Things to-dos, with correct
+   due dates and notes breadcrumbs.
+2. Re-run `sync --list Scratch` — output shows all skips, no duplicates appear.
+   This is the idempotence check, and the one most likely to catch a real bug.
+3. Complete a to-do in Things, re-run — the matching reminder is completed.
+4. Edit a to-do's title in Things, re-run — the reminder is updated in place, not
+   duplicated.
+5. Delete a mirrored reminder by hand, re-run — it is recreated.
+6. Create an unrelated reminder by hand in the same list, re-run — it is untouched.
