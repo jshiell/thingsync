@@ -346,44 +346,121 @@ def sync_command(
     return 0
 
 
-def rebuild_state_command(args) -> int:
-    from thingsync.registry import load as load_registry, registry_path, save as save_registry
+def rebuild_state_command(
+    args,
+    load_todos: Callable[[], list[ThingsTodo]] | None = None,
+    load_projects: Callable[[], list[ThingsProject]] | None = None,
+) -> int:
+    """Reconstruct the registry and every state file from calendar contents.
+
+    Attribution is contents-first, same as the rest of the identity model: a
+    calendar is a project's list because its markers say so, not because its
+    title happens to match. Title is only the last resort, for a list with no
+    markers at all. Every case this cannot resolve on its own — an orphaned
+    marker, an empty unattributable list, one project's markers split across
+    two lists — is named and reported rather than silently guessed at.
+    """
+    from thingsync.registry import Registry, RegistryEntry, registry_path, save as save_registry
     from thingsync.state import inbox_state_path, project_state_path, save as save_state
-    from thingsync.things_source import load_projects
+
+    if load_todos is None:
+        from thingsync.things_source import load_todos
+    if load_projects is None:
+        from thingsync.things_source import load_projects
 
     sink, manager = _open_reminders()
     projects = load_projects()
-    by_title = {list_title_for_project(project): project for project in projects}
+    todos = load_todos()
+    todo_by_uuid = {todo.uuid: todo for todo in todos}
+    project_by_uuid = {project.uuid: project for project in projects}
 
     existing_calendars = manager.all_calendars()
     scans = manager.scan(existing_calendars)
 
-    reg_path = registry_path()
-    registry = load_registry(reg_path)
-    recovered = 0
+    by_project: dict[str, list[tuple]] = {}
+    inbox_candidates: list[tuple] = []
+    unattributed: list[tuple] = []
+    orphans_by_title: dict[str, list[str]] = {}
 
     for calendar, scan in zip(existing_calendars, scans):
-        project = by_title.get(scan.title)
-        # The payload hash is deliberately left unmatchable: the next sync
-        # will rewrite every adopted reminder rather than assume it is
-        # already correct.
-        items = {uuid: StateEntry(identifier, "") for uuid, identifier in scan.marked.items()}
-        if not items and project is None and scan.title != FALLBACK_LIST_TITLE:
-            continue
+        found_projects = set()
+        found_inbox = False
+        orphans = []
 
-        if project is not None:
-            state = State(target_list=scan.title, items=items, project_uuid=project.uuid)
-            save_state(project_state_path(project.uuid), state)
-            registry.projects[project.uuid] = RegistryEntry(calendar.calendarIdentifier(), scan.title)
-        elif scan.title == FALLBACK_LIST_TITLE:
-            save_state(inbox_state_path(), State(target_list=scan.title, items=items, project_uuid=None))
+        for uuid in scan.marked:
+            todo = todo_by_uuid.get(uuid)
+            if todo is None:
+                orphans.append(uuid)
+            elif todo.project_uuid is not None:
+                found_projects.add(todo.project_uuid)
+            else:
+                found_inbox = True
+
+        if orphans:
+            orphans_by_title[scan.title] = orphans
+
+        if len(found_projects) > 1:
+            print(f"  ambiguous  {scan.title!r} carries markers for {len(found_projects)} different projects; left as-is")
+            unattributed.append((calendar, scan))
+        elif len(found_projects) == 1:
+            (project_uuid,) = found_projects
+            by_project.setdefault(project_uuid, []).append((calendar, scan))
+        elif found_inbox:
+            inbox_candidates.append((calendar, scan))
         else:
+            # No markers at all (or only orphans): title is the only signal left.
+            title_matches = [p for p in projects if list_title_for_project(p) == scan.title]
+            if len(title_matches) == 1:
+                by_project.setdefault(title_matches[0].uuid, []).append((calendar, scan))
+            elif scan.title == FALLBACK_LIST_TITLE:
+                inbox_candidates.append((calendar, scan))
+            else:
+                unattributed.append((calendar, scan))
+
+    reg_path = registry_path()
+    registry = Registry()
+    recovered = 0
+
+    for project_uuid, entries in by_project.items():
+        project = project_by_uuid.get(project_uuid)
+        name = project.title if project else project_uuid
+        if len(entries) > 1:
+            names = ", ".join(repr(scan.title) for _, scan in entries)
+            print(f"      split  project {name!r}'s markers are split across {len(entries)} lists ({names}); resolve by hand, then rebuild-state again")
             continue
 
+        calendar, scan = entries[0]
+        items = {
+            uuid: StateEntry(identifier, "")
+            for uuid, identifier in scan.marked.items()
+            if todo_by_uuid.get(uuid) is not None and todo_by_uuid[uuid].project_uuid == project_uuid
+        }
+        title = list_title_for_project(project) if project else scan.title
+        save_state(project_state_path(project_uuid), State(target_list=title, items=items, project_uuid=project_uuid))
+        registry.projects[project_uuid] = RegistryEntry(calendar.calendarIdentifier(), scan.title)
         recovered += len(items)
 
+    if len(inbox_candidates) > 1:
+        names = ", ".join(repr(scan.title) for _, scan in inbox_candidates)
+        print(f"      split  to-dos with no project are marked across {len(inbox_candidates)} lists ({names}); resolve by hand, then rebuild-state again")
+    elif inbox_candidates:
+        _, scan = inbox_candidates[0]
+        items = {
+            uuid: StateEntry(identifier, "")
+            for uuid, identifier in scan.marked.items()
+            if todo_by_uuid.get(uuid) is not None and todo_by_uuid[uuid].project_uuid is None
+        }
+        save_state(inbox_state_path(), State(target_list=FALLBACK_LIST_TITLE, items=items, project_uuid=None))
+        recovered += len(items)
+
+    for title, uuids in orphans_by_title.items():
+        print(f"     orphan  {title!r} has marker(s) for to-do(s) no longer in Things: {', '.join(sorted(uuids))} (left as-is)")
+
+    for _, scan in unattributed:
+        print(f"unattributed  {scan.title!r}: no markers and no matching project title; left as-is")
+
     save_registry(reg_path, registry)
-    print(f"Recovered {recovered} mappings across {len(existing_calendars)} lists into {reg_path.parent}")
+    print(f"\nRecovered {recovered} mappings across {len(existing_calendars)} lists into {reg_path.parent}")
     return 0
 
 

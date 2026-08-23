@@ -463,3 +463,139 @@ def test_rebuild_state_also_reports_a_denied_grant_without_a_traceback(monkeypat
 
     assert code == 1
     assert "thingsync doctor" in capsys.readouterr().err
+
+
+# --- rebuild-state: project-aware recovery from calendar contents ---
+
+from thingsync.registry import RegistryEntry, load as load_registry, registry_path
+
+
+def marker_scan(calendar_id, title, marked):
+    return FakeScan(calendar_id, title, dict(marked))
+
+
+def test_a_projects_markers_recover_its_state_and_registry_entry(monkeypatch, tmp_path):
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path))
+    website = FakeCalendar("CAL-P1", "Website")
+    manager = FakeManager(
+        calendars=[website, fallback_calendar()],
+        scans=[marker_scan("CAL-P1", "Website", {"U1": "R1"}), marker_scan("INBOX", FALLBACK_LIST_TITLE, {})],
+    )
+    sink = FakeSink()
+    monkeypatch.setattr(cli, "_open_reminders", lambda: (sink, manager))
+
+    code = cli.rebuild_state_command(
+        argparse.Namespace(),
+        load_todos=lambda: [ThingsTodo(uuid="U1", title="Buy tiles", project_uuid="P1")],
+        load_projects=lambda: [ThingsProject(uuid="P1", title="Website", status="incomplete")],
+    )
+
+    assert code == 0
+    from thingsync.state import load as load_state, project_state_path
+
+    recovered = load_state(project_state_path("P1"), target_list="Website", project_uuid="P1")
+    assert recovered.items == {"U1": StateEntry("R1", "")}
+    assert load_registry(registry_path()).projects["P1"] == RegistryEntry("CAL-P1", "Website")
+
+
+def test_an_orphan_marker_is_reported_and_excluded(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path))
+    website = FakeCalendar("CAL-P1", "Website")
+    manager = FakeManager(
+        calendars=[website, fallback_calendar()],
+        scans=[
+            marker_scan("CAL-P1", "Website", {"U1": "R1", "GONE": "R9"}),
+            marker_scan("INBOX", FALLBACK_LIST_TITLE, {}),
+        ],
+    )
+    sink = FakeSink()
+    monkeypatch.setattr(cli, "_open_reminders", lambda: (sink, manager))
+
+    code = cli.rebuild_state_command(
+        argparse.Namespace(),
+        load_todos=lambda: [ThingsTodo(uuid="U1", title="Buy tiles", project_uuid="P1")],
+        load_projects=lambda: [ThingsProject(uuid="P1", title="Website", status="incomplete")],
+    )
+
+    assert code == 0
+    from thingsync.state import load as load_state, project_state_path
+
+    recovered = load_state(project_state_path("P1"), target_list="Website", project_uuid="P1")
+    assert recovered.items == {"U1": StateEntry("R1", "")}
+    assert "GONE" in capsys.readouterr().out
+
+
+def test_an_empty_unattributable_list_is_reported_not_silently_dropped(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path))
+    mystery = FakeCalendar("CAL-X", "Mystery List")
+    manager = FakeManager(
+        calendars=[mystery, fallback_calendar()],
+        scans=[marker_scan("CAL-X", "Mystery List", {}), marker_scan("INBOX", FALLBACK_LIST_TITLE, {})],
+    )
+    sink = FakeSink()
+    monkeypatch.setattr(cli, "_open_reminders", lambda: (sink, manager))
+
+    code = cli.rebuild_state_command(
+        argparse.Namespace(),
+        load_todos=lambda: [],
+        load_projects=lambda: [ThingsProject(uuid="P1", title="Website", status="incomplete")],
+    )
+
+    assert code == 0
+    assert "Mystery List" in capsys.readouterr().out
+    assert "P1" not in load_registry(registry_path()).projects
+
+
+def test_a_projects_markers_split_across_two_lists_is_reported_not_silently_picked(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path))
+    first = FakeCalendar("CAL-1", "Website")
+    second = FakeCalendar("CAL-2", "Website Copy")
+    manager = FakeManager(
+        calendars=[first, second, fallback_calendar()],
+        scans=[
+            marker_scan("CAL-1", "Website", {"U1": "R1"}),
+            marker_scan("CAL-2", "Website Copy", {"U2": "R2"}),
+            marker_scan("INBOX", FALLBACK_LIST_TITLE, {}),
+        ],
+    )
+    sink = FakeSink()
+    monkeypatch.setattr(cli, "_open_reminders", lambda: (sink, manager))
+
+    code = cli.rebuild_state_command(
+        argparse.Namespace(),
+        load_todos=lambda: [
+            ThingsTodo(uuid="U1", title="a", project_uuid="P1"),
+            ThingsTodo(uuid="U2", title="b", project_uuid="P1"),
+        ],
+        load_projects=lambda: [ThingsProject(uuid="P1", title="Website", status="incomplete")],
+    )
+
+    assert code == 0
+    output = capsys.readouterr().out
+    assert "Website" in output and "Website Copy" in output
+    assert "P1" not in load_registry(registry_path()).projects
+    from thingsync.state import project_state_path
+
+    assert not project_state_path("P1").exists()
+
+
+def test_markers_for_todos_with_no_project_recover_into_the_inbox(monkeypatch, tmp_path):
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path))
+    manager = FakeManager(
+        calendars=[fallback_calendar()],
+        scans=[marker_scan("INBOX", FALLBACK_LIST_TITLE, {"U1": "R1"})],
+    )
+    sink = FakeSink()
+    monkeypatch.setattr(cli, "_open_reminders", lambda: (sink, manager))
+
+    code = cli.rebuild_state_command(
+        argparse.Namespace(),
+        load_todos=lambda: [ThingsTodo(uuid="U1", title="Buy milk")],
+        load_projects=lambda: [],
+    )
+
+    assert code == 0
+    from thingsync.state import load as load_state, inbox_state_path
+
+    recovered = load_state(inbox_state_path(), target_list=FALLBACK_LIST_TITLE, project_uuid=None)
+    assert recovered.items == {"U1": StateEntry("R1", "")}
