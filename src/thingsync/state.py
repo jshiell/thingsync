@@ -43,7 +43,7 @@ LEGACY_MIGRATION_HINT = (
     "`thingsync sync` to build fresh per-project lists."
 )
 
-KNOWN_ROOT_FILES: frozenset[str] = frozenset({"_projects.json"})
+KNOWN_ROOT_FILES: frozenset[str] = frozenset({"_projects.json", "inbox.json"})
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,7 @@ class StateEntry:
 class State:
     target_list: str
     items: dict[str, StateEntry] = field(default_factory=dict)
+    project_uuid: str | None = None
 
 
 DEFAULT_ROOT = Path.home() / ".local" / "state" / "thingsync"
@@ -83,12 +84,29 @@ def state_path(target_list: str, root: Path | None = None) -> Path:
     return (root or state_root()) / f"{slug}.json"
 
 
+PROJECTS_SUBDIR = "projects"
+INBOX_STATE_FILENAME = "inbox.json"
+
+
+def project_state_path(project_uuid: str, root: Path | None = None) -> Path:
+    """One state file per Things project, keyed by UUID rather than its
+    (mutable) title, under its own subdirectory so it is never mistaken for a
+    leftover single-list state file."""
+    return (root or state_root()) / PROJECTS_SUBDIR / f"{project_uuid}.json"
+
+
+def inbox_state_path(root: Path | None = None) -> Path:
+    """The one fixed state file for to-dos with no project."""
+    return (root or state_root()) / INBOX_STATE_FILENAME
+
+
 def save(path: Path, state: State) -> None:
     """Write the state atomically: temp file alongside, then ``os.replace``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {
         "version": VERSION,
         "target_list": state.target_list,
+        "project_uuid": state.project_uuid,
         "items": {
             uuid: {"reminder_id": entry.reminder_id, "hash": entry.hash}
             for uuid, entry in state.items.items()
@@ -99,15 +117,22 @@ def save(path: Path, state: State) -> None:
     os.replace(temp, path)
 
 
-def load(path: Path, target_list: str) -> State:
-    """Read the state for ``target_list``, or an empty state if none exists yet."""
+def load(path: Path, target_list: str, project_uuid: str | None = None) -> State:
+    """Read the state for ``target_list``, or an empty state if none exists yet.
+
+    The mismatch guard keys on ``project_uuid`` whenever either side has one,
+    since a project's title can be renamed in Things at any time; only when
+    neither side carries a project_uuid does it fall back to the older,
+    title-based guard.
+    """
     if not path.exists():
-        return State(target_list=target_list, items={})
+        return State(target_list=target_list, items={}, project_uuid=project_uuid)
 
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         version = document["version"]
         stored_list = document["target_list"]
+        stored_project_uuid = document.get("project_uuid")
         items = {
             uuid: StateEntry(reminder_id=entry["reminder_id"], hash=entry["hash"])
             for uuid, entry in document["items"].items()
@@ -125,10 +150,16 @@ def load(path: Path, target_list: str) -> State:
     if version != VERSION:
         raise StateError(f"{path} is state version {version}, but this thingsync understands version {VERSION}; {REPAIR_HINT}")
 
-    if stored_list != target_list:
+    if project_uuid is not None or stored_project_uuid is not None:
+        if stored_project_uuid != project_uuid:
+            raise StateError(
+                f"{path} holds state for project {stored_project_uuid!r}, but project "
+                f"{project_uuid!r} was requested; refusing to apply one project's mappings to another"
+            )
+    elif stored_list != target_list:
         raise StateError(f"{path} holds state for list {stored_list!r}, but list {target_list!r} was requested; refusing to apply one list's mappings to another")
 
-    return State(target_list=stored_list, items=items)
+    return State(target_list=stored_list, items=items, project_uuid=stored_project_uuid)
 
 
 def legacy_state_files(root: Path | None = None) -> list[Path]:
