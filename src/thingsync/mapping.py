@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from urllib.parse import parse_qs, urlsplit
 
-from thingsync.model import ReminderPayload, ThingsTodo
+from thingsync.model import ReminderPayload, ThingsProject, ThingsTodo
 
 MARKER_SCHEME = "things"
 MARKER_PATH = "/show"
@@ -40,21 +40,36 @@ def _parse_things_date(value: str | None) -> date | None:
 BREADCRUMB_SEPARATOR = " › "
 CHECKLIST_BULLET = "☐ "
 
+FALLBACK_LIST_TITLE = "Things — Inbox"
 
-def breadcrumb(todo: ThingsTodo) -> str:
-    """``Area › Project › Heading``, skipping the levels the to-do does not have."""
-    levels = (todo.area_title, todo.project_title, todo.heading_title)
+
+def list_title_for_project(project: ThingsProject) -> str:
+    """The Reminders list title for a Things project."""
+    return project.title
+
+
+def breadcrumb(todo: ThingsTodo, in_project_list: bool = False) -> str:
+    """``Area › Project › Heading``, skipping the levels the to-do does not have.
+
+    Inside a project's own list the project level is dropped: the list itself
+    already conveys it, so repeating it in every note would just be noise.
+    """
+    levels = (
+        todo.area_title,
+        None if in_project_list else todo.project_title,
+        todo.heading_title,
+    )
     return BREADCRUMB_SEPARATOR.join(level for level in levels if level)
 
 
-def compose_notes(todo: ThingsTodo) -> str:
+def compose_notes(todo: ThingsTodo, in_project_list: bool = False) -> str:
     """Build the reminder's notes body.
 
     EventKit has no public API for tags or nested reminders, so the breadcrumb,
     checklist and tags are all flattened into this one text field.
     """
     blocks = [
-        breadcrumb(todo),
+        breadcrumb(todo, in_project_list),
         (todo.notes or "").strip(),
         "\n".join(CHECKLIST_BULLET + item for item in todo.checklist),
         " ".join("#" + tag for tag in todo.tags),
@@ -62,11 +77,11 @@ def compose_notes(todo: ThingsTodo) -> str:
     return "\n\n".join(block for block in blocks if block)
 
 
-def to_payload(todo: ThingsTodo) -> ReminderPayload:
+def to_payload(todo: ThingsTodo, in_project_list: bool = False) -> ReminderPayload:
     """Map a Things to-do onto the payload written to its mirrored reminder."""
     return ReminderPayload(
         title=todo.title,
-        notes=compose_notes(todo),
+        notes=compose_notes(todo, in_project_list),
         url=marker_url(todo.uuid),
         due_date=_parse_things_date(todo.deadline),
         start_date=_parse_things_date(todo.start_date),

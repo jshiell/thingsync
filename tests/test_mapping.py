@@ -70,3 +70,43 @@ def test_checklist_and_tags_are_appended_as_text():
     assert to_payload(todo).notes == (
         "the body\n\n☐ pack bags\n☐ book taxi\n\n#errand #urgent"
     )
+
+
+def test_inside_a_projects_own_list_the_project_level_is_dropped():
+    # The list itself already conveys the project, so repeating it in every
+    # note's breadcrumb would just be noise.
+    todo = ThingsTodo(
+        uuid="U1",
+        title="t",
+        area_title="Work",
+        project_title="Website",
+        heading_title="Launch",
+    )
+
+    assert to_payload(todo, in_project_list=True).notes == "Work › Launch"
+
+
+def test_outside_a_project_list_the_project_level_is_kept():
+    todo = ThingsTodo(
+        uuid="U1",
+        title="t",
+        area_title="Work",
+        project_title="Website",
+        heading_title="Launch",
+    )
+
+    assert to_payload(todo, in_project_list=False).notes == "Work › Website › Launch"
+
+
+from thingsync.mapping import FALLBACK_LIST_TITLE, list_title_for_project
+from thingsync.model import ThingsProject
+
+
+def test_a_project_maps_onto_its_own_list_title():
+    project = ThingsProject(uuid="P1", title="Website", status="incomplete")
+
+    assert list_title_for_project(project) == "Website"
+
+
+def test_fallback_list_title_is_a_stable_constant():
+    assert FALLBACK_LIST_TITLE == "Things — Inbox"
