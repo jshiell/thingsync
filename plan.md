@@ -38,7 +38,15 @@ per-project work extends them directly. Full detail lives in the code and in
 | A `things:///` URL marker survives `setURL_` → save → refetch, locally | **Yes**, exercised by an opt-in live test (`tests/test_reminders_sink.py`) |
 | That marker survives an actual iCloud full resync | **Unverified** — no test triggers a real resync. Load-bearing for the identity model below; still gating. |
 
-New spikes for the per-project work append to this table (see Increment 0).
+New spikes for the per-project work, verified live 2026-08-23 (throwaway script, deleted after use — not committed):
+
+| Claim | Result |
+|---|---|
+| `EKReminder.setCalendar_` + save moves a reminder between lists, preserving its `URL` marker and `calendarItemIdentifier` | **Yes** — moved reminder kept the same `calendarItemIdentifier` and `URL`, disappeared from a scan of the old list, appeared in a scan of the new one |
+| `predicateForCompletedRemindersWithCompletionDateStarting_ending_calendars_` returns completed reminders with `URL()` intact | **Yes** — the completed reminder was returned with its marker URL unchanged |
+| `saveCalendar_commit_error_` can rename an existing iCloud reminders list in place | **Yes** — the old title disappeared and the new one appeared among `calendarsForEntityType_`, same calendar object |
+| `removeCalendar_commit_error_` deletes a list | **Yes** — the title was absent afterward |
+| `EKCalendar.calendarIdentifier` survives a full iCloud resync | **Unverified** (non-gating) — no test triggers a real resync |
 
 ### Identity model recap
 
