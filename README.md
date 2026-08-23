@@ -9,12 +9,20 @@ Things is the source of truth. Reminders is a reflection of it.
 
 This is worth understanding before you run it.
 
-- Every open, non-trashed Things to-do is mirrored into one Reminders list.
+- Every open Things **project** gets its own Reminders list, named to match —
+  created automatically, renamed automatically if you rename the project in
+  Things. To-dos with no project (Inbox, or sitting directly in an area) land
+  in one fixed fallback list, `Things — Inbox`.
 - **Edits you make in Reminders are never read back, and are overwritten on the
-  next run.** Rename a mirrored reminder and the next sync renames it back.
-- The mirrored list is safe to delete entirely. A later sync rebuilds it.
-- Reminders you created by hand in the target list are **never** touched.
-  thingsync only ever modifies reminders it can prove are its own.
+  next run.** Rename a mirrored reminder and the next sync renames it back;
+  drag one into a different Reminders list and the next sync moves it back.
+- A project's list is safe to delete entirely. A later sync rebuilds it.
+- When a project is completed, cancelled or deleted in Things, its Reminders
+  list is deleted too — but only once thingsync can prove every reminder in it
+  is its own (see "Deleting a project's list" below).
+- Reminders you created by hand in any thingsync-owned list are **never**
+  touched. thingsync only ever modifies reminders — and lists — it can prove
+  are its own.
 
 ## Install
 
@@ -60,26 +68,25 @@ a different app".
 
 ## Usage
 
-Always do the first run dry, into a throwaway list:
+Always do the first run dry:
 
 ```sh
-uv run thingsync sync --dry-run --list Scratch   # print the plan, write nothing
-uv run thingsync sync --list Scratch             # do it
-uv run thingsync sync                            # the default list, "Things"
+uv run thingsync sync --dry-run   # print the plan for every project, write nothing
+uv run thingsync sync             # do it — creates one list per open project
 ```
 
 | Flag | Effect |
 |---|---|
-| `--list NAME` | Target Reminders list. Default `Things`. Created on first write. |
-| `--dry-run` | Print the plan and write nothing at all — not even the list. |
+| `--project NAME` | Restrict this run to one project's list, by title. A to-do that has since moved out of that project is left alone rather than implicitly widening scope. An ambiguous name (two projects with the same title) is a hard error, not a silent first match. |
+| `--dry-run` | Print the plan and write nothing at all — not even a new list. |
 | `--on-done delete` | Delete finished reminders instead of completing them. |
-| `--yes` | Authorise completing or deleting more than 10 reminders in one run. |
+| `--yes` | Authorise completing/deleting more than 10 reminders, **or deleting any list at all** — list deletion always needs it, regardless of count. |
 
 Other commands:
 
 ```sh
 uv run thingsync doctor          # check permissions
-uv run thingsync rebuild-state   # reconstruct the state file from the list
+uv run thingsync rebuild-state   # reconstruct the registry and every state file from Reminders
 ```
 
 ## How identity survives
@@ -98,8 +105,11 @@ reminder.URL = things:///show?id=<things-uuid>
 
 This survives state-file loss by construction — the marker is what `rebuild-state`
 scans for — and doubles as a working deep link back into Things — tap it and Things
-opens the to-do. The state file at `~/.local/state/thingsync/<list>.json` is only a
-fast-path cache; set `THINGSYNC_STATE_DIR` to move it.
+opens the to-do. State lives under `~/.local/state/thingsync/` (set
+`THINGSYNC_STATE_DIR` to move it) and is only ever a fast-path cache:
+`projects/<project-uuid>.json` per project, `inbox.json` for the fallback list,
+and `_projects.json` — the registry mapping each project UUID to the Reminders
+list currently mirroring it.
 
 **Whether the marker itself survives an actual iCloud full resync is unverified.**
 The design assumes it does — that's the whole reason `calendarItemIdentifier` (which
@@ -115,8 +125,50 @@ Consequences worth knowing:
   marker. No duplicates.
 - **Corrupting the state file is a hard error**, never a silent "start fresh" —
   that is the duplication path again. Run `thingsync rebuild-state`.
-- Each target list gets its own state file, so `--list Scratch` can never leave
-  mappings that a later default run applies to the wrong list.
+- Each project gets its own state file, keyed by the project's UUID rather
+  than its title, so renaming a project in Things never trips a "wrong list"
+  guard the way a title-keyed file would.
+
+## List identity is weaker than reminder identity
+
+`EKReminder` has a `URL` field to carry the marker above. `EKCalendar` — a
+Reminders list — has no such field: no notes, no URL, nothing writable that
+isn't user-visible. So a project's list can't carry an in-band marker at all,
+and its identity has to be recovered a different way:
+
+1. **Contents first.** Does a list's *contents* carry markers for this
+   project's to-dos? This is the same scan `rebuild-state` already needs, so
+   it costs nothing extra.
+2. **Title, only as a last resort**, and only when a list is completely empty
+   of markers — there is nothing else left to go on. Things allows two
+   projects to share a title, so this step refuses to guess when more than one
+   existing list matches.
+3. **The cached calendar ID** (in `_projects.json`) is a fast path only, the
+   same role the cached reminder ID plays above — never trusted on its own.
+
+### Deleting a project's list
+
+When a project closes (completed, cancelled, or gone from Things entirely),
+thingsync will delete its Reminders list — but removing a calendar removes
+everything inside it, including completed reminders, so the safety rule above
+applies to lists too: deletion only proceeds once a full scan (completed
+reminders included, not just the open ones a normal sync scans) shows every
+reminder in the list is thingsync's own. Any reminder it can't prove ownership
+of refuses the deletion, and that refusal is printed **every run** until you
+resolve it by hand — never silenced after the first time you saw it. List
+deletion also always requires `--yes`, independent of the usual
+completion/deletion threshold: it's a bigger blast radius than completing one
+reminder, since it also erases that project's completed-reminder history.
+
+## Migrating from the single-list version
+
+If you used the flat single-list version of thingsync before, `sync` will
+refuse to run and name the manual migration steps the first time you run it
+after upgrading: delete the old list by hand, delete its old state file, then
+re-run `sync` to build fresh per-project lists. This check exists so the
+upgrade itself can't silently duplicate your entire list — the old, now
+unwatched state file would otherwise sit there forever while every to-do got
+mirrored again into a brand new list.
 
 ## Why there is no scheduled/launchd version
 
@@ -141,15 +193,24 @@ a flag.
 - **Repeating to-dos** mirror as the single next instance, with no recurrence rule.
 - **`reminder_time` is not mapped.** A to-do with an explicit reminder time loses
   it. No alarms are ever set — one alarm per mirrored to-do would be an avalanche.
-- **Reminders-side edits are lost** on the next run. By design.
+- **Reminders-side edits are lost** on the next run. By design — including a
+  reminder you drag into a different Reminders list by hand: the next sync
+  moves it back to the list its Things to-do actually belongs in.
 - **Un-completing** a to-do in Things creates a fresh reminder; the previously
   completed one is left in place.
-- A reminder you **move to a different list** is still updated in place, in the
-  wrong list.
 - Reading while Things is being actively edited can mix snapshots — tags and
   checklists are separate queries in separate transactions — which surfaces as a
   spurious update. Harmless.
 - Things must have been launched at least once on this Mac.
+- **List identity recovery is weaker than reminder identity recovery** (see
+  above): an identifier rotation on a list that is also completely empty, with
+  no title match either, is genuinely unrecoverable and creates a second list.
+- **A user with 100+ open Things projects gets 100+ Reminders lists.** Not
+  addressed here — flagged as an open product question if it becomes a real
+  problem in practice, not solved speculatively.
+- **`rebuild-state` can't attribute a wholly empty, unmarked list back to a
+  project** by contents; if its title doesn't match one either, it's reported
+  and left for you to resolve by hand.
 
 ## Development
 
@@ -158,8 +219,12 @@ uv run pytest            # unit suite; adapters are faked
 uv run pytest -m live    # opt-in, touches the real Things DB and Reminders
 ```
 
-`planner.py`, `mapping.py` and `state.py` are pure and carry the test weight.
-`things_source.py` and `reminders_sink.py` are the only macOS-touching modules.
+`planner.py`, `projects_planner.py`, `mapping.py`, `state.py` and `registry.py`
+are pure and carry the test weight. `things_source.py` and `reminders_sink.py`
+are the only macOS-touching modules — the latter splits into `CalendarManager`
+(enumerate/create/rename/delete lists, and scan their contents) and
+`RemindersSink` (create/update/move/complete/delete one reminder, given an
+already-resolved calendar).
 
 Writes commit one at a time (`commit=True`) rather than batching. Batching is
 faster on a first run but makes a batch all-or-nothing, which contradicts the
