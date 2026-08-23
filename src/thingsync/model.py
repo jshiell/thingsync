@@ -23,10 +23,20 @@ class ThingsTodo:
     area_title: str | None = None
     project_title: str | None = None
     heading_title: str | None = None
+    project_uuid: str | None = None
     tags: tuple[str, ...] = ()
     checklist: tuple[str, ...] = ()
     deadline: str | None = None
     start_date: str | None = None
+
+
+@dataclass(frozen=True)
+class ThingsProject:
+    """One Things project, open or not — the per-project Reminders list source."""
+
+    uuid: str
+    title: str
+    status: str
 
 
 @dataclass(frozen=True)
