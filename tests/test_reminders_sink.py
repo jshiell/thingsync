@@ -92,6 +92,26 @@ def test_a_reminder_without_a_marker_is_foreign_and_invisible_to_the_marker_scan
 
 
 @pytest.mark.live
+def test_a_completed_reminder_without_a_marker_is_foreign(live_calendar):
+    # The exact case the deletion guard exists for: a hand-made reminder that
+    # was later completed. It drops out of the incomplete fetch entirely, so
+    # only the completed-reminders half of the scan can catch it.
+    import EventKit
+
+    manager, sink, calendar = live_calendar
+    stranger = EventKit.EKReminder.reminderWithEventStore_(sink._store)
+    stranger.setCalendar_(calendar)
+    stranger.setTitle_("hand made, then completed")
+    sink._save(stranger)
+    stranger.setCompleted_(True)
+    sink._save(stranger)
+
+    scan = manager.scan([calendar])[0]
+    assert scan.marked == {}
+    assert scan.has_foreign_reminder is True
+
+
+@pytest.mark.live
 def test_moving_a_reminder_preserves_its_identifier_and_marker(live_calendar):
     manager, sink, calendar_a = live_calendar
     calendar_b = manager.create("thingsync-test-b")
