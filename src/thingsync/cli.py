@@ -5,23 +5,27 @@ from __future__ import annotations
 import argparse
 import sys
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 
+from thingsync.mapping import FALLBACK_LIST_TITLE, list_title_for_project
+from thingsync.model import ThingsProject, ThingsTodo
 from thingsync.planner import ActionKind, SyncAction, destructive_actions
-from thingsync.protocols import ReminderSink, TodoSource
+from thingsync.projects_planner import CalendarInfo, ListAction, ListActionKind, plan_lists
+from thingsync.protocols import ReminderSink
+from thingsync.registry import RegistryEntry
 from thingsync.state import State, StateEntry
 
-DEFAULT_LIST = "Things"
 DESTRUCTIVE_THRESHOLD = 10
 
 
 def refusal_for_bulk_destruction(
     actions: Iterable[SyncAction], assume_yes: bool
 ) -> str | None:
-    """Refuse to clear a list wholesale unless explicitly authorised.
+    """Refuse to clear reminders wholesale unless explicitly authorised.
 
-    A planner bug, a half-read database or the wrong ``--list`` should not be
-    able to silently empty someone's reminders.
+    A planner bug or a half-read database should not be able to silently
+    empty someone's reminders. List deletion has its own, separate gate: it
+    always needs ``--yes``, regardless of how many lists are involved.
     """
     if assume_yes:
         return None
@@ -40,27 +44,38 @@ def refusal_for_bulk_destruction(
 def execute(
     actions: Iterable[SyncAction],
     sink: ReminderSink,
-    state: State,
-    persist: Callable[[State], None],
+    states: Mapping[str | None, State],
+    state_key_for_uuid: Mapping[str, str | None],
+    persist: Callable[[str | None, State], None],
 ) -> Counter:
-    """Carry out the plan, recording each success before moving on.
+    """Carry out the reminder-level plan, recording each success before moving on.
 
-    The state is persisted after every action rather than once at the end: a
-    crash partway through must not leave created reminders unrecorded.
+    Every project's (and the fallback's) state is persisted after every
+    action rather than once at the end: a crash partway through must not
+    leave created or moved reminders unrecorded.
     """
     tally: Counter = Counter()
 
     for action in actions:
+        key = state_key_for_uuid[action.uuid]
+        state = states[key]
+
         if action.kind is ActionKind.CREATE:
-            identifier = sink.create(action.payload)
-            state.items[action.uuid] = StateEntry(
-                identifier, action.payload.content_hash()
-            )
+            identifier = sink.create(action.calendar_id, action.payload)
+            state.items[action.uuid] = StateEntry(identifier, action.payload.content_hash())
+        elif action.kind is ActionKind.MOVE:
+            # Drop any stale record of this to-do under its old project first:
+            # a crash here just means the next run's marker scan finds the
+            # reminder still sitting in its old calendar and retries the move,
+            # never a duplicate.
+            for other_key, other_state in states.items():
+                if other_key != key and other_state.items.pop(action.uuid, None) is not None:
+                    persist(other_key, other_state)
+            sink.move(action.reminder_id, action.calendar_id, action.payload)
+            state.items[action.uuid] = StateEntry(action.reminder_id, action.payload.content_hash())
         elif action.kind in (ActionKind.ADOPT, ActionKind.UPDATE):
             sink.update(action.reminder_id, action.payload)
-            state.items[action.uuid] = StateEntry(
-                action.reminder_id, action.payload.content_hash()
-            )
+            state.items[action.uuid] = StateEntry(action.reminder_id, action.payload.content_hash())
         elif action.kind is ActionKind.COMPLETE:
             sink.complete(action.reminder_id)
             state.items.pop(action.uuid, None)
@@ -74,7 +89,7 @@ def execute(
             continue
 
         tally[action.kind.value] += 1
-        persist(state)
+        persist(key, state)
 
     return tally
 
@@ -88,21 +103,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("doctor", help="check the permissions thingsync needs")
 
-    sync = commands.add_parser("sync", help="mirror open Things to-dos into Reminders")
-    sync.add_argument("--list", dest="target_list", default=DEFAULT_LIST,
-                      help=f"target Reminders list (default: {DEFAULT_LIST})")
+    sync = commands.add_parser(
+        "sync", help="mirror open Things to-dos into one Reminders list per project"
+    )
+    sync.add_argument(
+        "--project", dest="project", default=None,
+        help="restrict this run to one project's list, by title",
+    )
     sync.add_argument("--dry-run", action="store_true",
                       help="print the plan and write nothing")
     sync.add_argument("--on-done", choices=("complete", "delete"), default="complete",
                       help="what to do with reminders whose to-do is no longer open")
     sync.add_argument("--yes", action="store_true",
-                      help="authorise bulk completion or deletion")
+                      help="authorise bulk completion/deletion of reminders, or any list deletion")
 
-    rebuild = commands.add_parser(
+    commands.add_parser(
         "rebuild-state",
-        help="reconstruct the state file by scanning the target list for markers",
+        help="reconstruct state by scanning every thingsync Reminders list for markers",
     )
-    rebuild.add_argument("--list", dest="target_list", default=DEFAULT_LIST)
 
     return parser
 
@@ -112,69 +130,260 @@ def describe(action: SyncAction) -> str:
     return f"{action.kind.value:>8}  {title}"
 
 
-def _open_sink(target_list: str):
-    from thingsync.reminders_sink import RemindersSink
+def describe_list_action(action: ListAction) -> str:
+    if action.reason:
+        return f"  refused  {action.title!r}: {action.reason}"
+    return f"{action.kind.value:>12}  {action.title!r}"
 
-    sink = RemindersSink(target_list)
+
+def _open_reminders():
+    from thingsync.reminders_sink import CalendarManager, RemindersSink
+
+    sink = RemindersSink()
     sink.request_access()
-    return sink
+    return sink, CalendarManager(sink._store)
 
 
-def sync_command(args, source: TodoSource | None = None) -> int:
+def _select_project(projects: list[ThingsProject], name: str) -> ThingsProject | str:
+    """The one project named ``name``, or an error message."""
+    matches = [p for p in projects if p.title == name]
+    if not matches:
+        return f"no open project named {name!r}"
+    if len(matches) > 1:
+        return f"{name!r} matches {len(matches)} projects; --project cannot disambiguate duplicate titles"
+    return matches[0]
+
+
+def _calendar_infos(existing_calendars, scans, todo_by_uuid: Mapping[str, ThingsTodo]) -> list[CalendarInfo]:
+    infos = []
+    for calendar, scan in zip(existing_calendars, scans):
+        attested = {
+            todo_by_uuid[uuid].project_uuid
+            for uuid in scan.marked
+            if uuid in todo_by_uuid and todo_by_uuid[uuid].project_uuid is not None
+        }
+        infos.append(CalendarInfo(scan.calendar_id, scan.title, frozenset(attested), scan.has_foreign_reminder))
+    return infos
+
+
+def sync_command(
+    args,
+    load_todos: Callable[[], list[ThingsTodo]] | None = None,
+    load_projects: Callable[[], list[ThingsProject]] | None = None,
+) -> int:
     from thingsync.planner import plan
-    from thingsync.state import check_for_legacy_state, load, save, state_path
+    from thingsync.registry import load as load_registry, registry_path, save as save_registry
+    from thingsync.state import (
+        check_for_legacy_state,
+        inbox_state_path,
+        load as load_state,
+        project_state_path,
+        save as save_state,
+    )
 
     check_for_legacy_state()
 
-    if source is None:
-        from thingsync.things_source import load_todos as source
+    if load_todos is None:
+        from thingsync.things_source import load_todos
+    if load_projects is None:
+        from thingsync.things_source import load_projects
 
-    path = state_path(args.target_list)
-    state = load(path, target_list=args.target_list)
-    todos = source()
+    todos = load_todos()
+    projects = load_projects()
+    todo_by_uuid = {todo.uuid: todo for todo in todos}
+    project_by_uuid = {project.uuid: project for project in projects}
 
-    sink = _open_sink(args.target_list)
-    markers = sink.scan_markers()
-    live_ids = sink.resolve_live(entry.reminder_id for entry in state.items.values())
+    selected_project: ThingsProject | None = None
+    if args.project is not None:
+        selected = _select_project(projects, args.project)
+        if isinstance(selected, str):
+            print(f"Refusing: {selected}", file=sys.stderr)
+            return 1
+        selected_project = selected
 
-    actions = plan(todos, state, markers, live_ids, on_done=args.on_done)
-    interesting = [a for a in actions if a.kind is not ActionKind.SKIP]
+    sink, manager = _open_reminders()
 
+    existing_calendars = manager.all_calendars()
+    scans = manager.scan(existing_calendars)
+    raw_calendar_by_id = {calendar.calendarIdentifier(): calendar for calendar in existing_calendars}
+    calendar_infos = _calendar_infos(existing_calendars, scans, todo_by_uuid)
+
+    reg_path = registry_path()
+    registry = load_registry(reg_path)
+
+    list_actions = plan_lists(projects, registry, calendar_infos)
+
+    calendar_for_project: dict[str | None, str] = {}
+    executed_list_actions: list[ListAction] = []
+
+    for action in list_actions:
+        execute_this_one = selected_project is None or action.project_uuid == selected_project.uuid
+
+        if action.kind is ListActionKind.CREATE_LIST:
+            if not execute_this_one:
+                calendar_for_project[action.project_uuid] = f"__pending__:{action.project_uuid}"
+            elif args.dry_run:
+                calendar_for_project[action.project_uuid] = f"(new list) {action.title}"
+            else:
+                calendar = manager.create(action.title)
+                calendar_id = calendar.calendarIdentifier()
+                raw_calendar_by_id[calendar_id] = calendar
+                calendar_for_project[action.project_uuid] = calendar_id
+                registry.projects[action.project_uuid] = RegistryEntry(calendar_id, action.title)
+                save_registry(reg_path, registry)
+        elif action.kind is ListActionKind.RENAME_LIST:
+            calendar_for_project[action.project_uuid] = action.calendar_id
+            if execute_this_one and not args.dry_run:
+                manager.rename(raw_calendar_by_id[action.calendar_id], action.title)
+                registry.projects[action.project_uuid] = RegistryEntry(action.calendar_id, action.title)
+                save_registry(reg_path, registry)
+        elif action.kind is ListActionKind.ADOPT_LIST:
+            calendar_for_project[action.project_uuid] = action.calendar_id
+            if execute_this_one and not args.dry_run:
+                calendar = raw_calendar_by_id[action.calendar_id]
+                if calendar.title() != action.title:
+                    manager.rename(calendar, action.title)
+                registry.projects[action.project_uuid] = RegistryEntry(action.calendar_id, action.title)
+                save_registry(reg_path, registry)
+        elif action.kind is ListActionKind.KEEP and action.reason is None:
+            calendar_for_project[action.project_uuid] = action.calendar_id
+
+        if execute_this_one:
+            executed_list_actions.append(action)
+            print(describe_list_action(action))
+
+    fallback_calendar = next((c for c in existing_calendars if c.title() == FALLBACK_LIST_TITLE), None)
+    if fallback_calendar is not None:
+        calendar_for_project[None] = fallback_calendar.calendarIdentifier()
+    elif args.dry_run:
+        calendar_for_project[None] = f"(new list) {FALLBACK_LIST_TITLE}"
+    else:
+        fallback_calendar = manager.create(FALLBACK_LIST_TITLE)
+        calendar_for_project[None] = fallback_calendar.calendarIdentifier()
+        raw_calendar_by_id[fallback_calendar.calendarIdentifier()] = fallback_calendar
+
+    # A todo/project race between the two Things reads (each its own
+    # transaction, see plan.md) could leave a todo pointing at a project this
+    # run never planned a list for. Route it to the fallback rather than
+    # crashing the whole sync over a to-do that will resolve itself next run.
+    for todo in todos:
+        calendar_for_project.setdefault(todo.project_uuid, calendar_for_project[None])
+
+    project_uuids_to_load = {p.uuid for p in projects if p.status == "incomplete"} | set(registry.projects.keys())
+
+    states: dict[str | None, State] = {}
+    state_key_for_uuid: dict[str, str | None] = {}
+
+    for uuid in project_uuids_to_load:
+        entry = registry.projects.get(uuid)
+        project = project_by_uuid.get(uuid)
+        title = list_title_for_project(project) if project else (entry.title if entry else uuid)
+        state = load_state(project_state_path(uuid), target_list=title, project_uuid=uuid)
+        states[uuid] = state
+        for todo_uuid in state.items:
+            state_key_for_uuid[todo_uuid] = uuid
+
+    inbox_state = load_state(inbox_state_path(), target_list=FALLBACK_LIST_TITLE, project_uuid=None)
+    states[None] = inbox_state
+    for todo_uuid in inbox_state.items:
+        state_key_for_uuid[todo_uuid] = None
+
+    for todo in todos:
+        state_key_for_uuid[todo.uuid] = todo.project_uuid
+
+    items = {}
+    for state in states.values():
+        items.update(state.items)
+
+    markers = {uuid: (scan.calendar_id, rid) for scan in scans for uuid, rid in scan.marked.items()}
+    all_reminder_ids = {entry.reminder_id for state in states.values() for entry in state.items.values()}
+    live = sink.resolve_live(all_reminder_ids)
+
+    reminder_actions = plan(todos, items, markers, live, calendar_for_project, on_done=args.on_done)
+
+    if selected_project is not None:
+        target_calendar_id = calendar_for_project[selected_project.uuid]
+        reminder_actions = [
+            action for action in reminder_actions
+            if (action.calendar_id == target_calendar_id if action.calendar_id is not None
+                else state_key_for_uuid.get(action.uuid) == selected_project.uuid)
+        ]
+
+    interesting = [a for a in reminder_actions if a.kind is not ActionKind.SKIP]
     for action in interesting:
         print(describe(action))
-    skipped = len(actions) - len(interesting)
+    skipped = len(reminder_actions) - len(interesting)
+
+    deletions = [a for a in executed_list_actions if a.kind is ListActionKind.DELETE_LIST]
+    confirmed_deletions = deletions if args.yes else []
+    if deletions and not args.yes:
+        for action in deletions:
+            print(f"  refused  {action.title!r}: list deletion always needs --yes")
 
     if args.dry_run:
         print(f"\n{len(interesting)} actions, {skipped} unchanged. Nothing written (--dry-run).")
         return 0
 
-    refusal = refusal_for_bulk_destruction(actions, assume_yes=args.yes)
+    refusal = refusal_for_bulk_destruction(reminder_actions, assume_yes=args.yes)
     if refusal:
         print(f"\nRefusing: {refusal}", file=sys.stderr)
         return 1
 
-    tally = execute(actions, sink, state, lambda s: save(path, s))
+    tally = execute(
+        reminder_actions, sink, states, state_key_for_uuid,
+        lambda key, state: save_state(project_state_path(key) if key is not None else inbox_state_path(), state),
+    )
+
+    for action in confirmed_deletions:
+        calendar = raw_calendar_by_id[action.calendar_id]
+        manager.delete(calendar)
+        project_state_path(action.project_uuid).unlink(missing_ok=True)
+        registry.projects.pop(action.project_uuid, None)
+        save_registry(reg_path, registry)
+
     summary = ", ".join(f"{count} {kind}" for kind, count in sorted(tally.items()))
     print(f"\n{summary or 'nothing to do'} ({skipped} unchanged)")
     return 0
 
 
 def rebuild_state_command(args) -> int:
-    from thingsync.state import save, state_path
+    from thingsync.registry import load as load_registry, registry_path, save as save_registry
+    from thingsync.state import inbox_state_path, project_state_path, save as save_state
+    from thingsync.things_source import load_projects
 
-    sink = _open_sink(args.target_list)
-    markers = sink.scan_markers()
+    sink, manager = _open_reminders()
+    projects = load_projects()
+    by_title = {list_title_for_project(project): project for project in projects}
 
-    # The payload hash is deliberately left unmatchable: the next sync will
-    # rewrite every adopted reminder rather than assume it is already correct.
-    state = State(
-        target_list=args.target_list,
-        items={uuid: StateEntry(identifier, "") for uuid, identifier in markers.items()},
-    )
-    path = state_path(args.target_list)
-    save(path, state)
+    existing_calendars = manager.all_calendars()
+    scans = manager.scan(existing_calendars)
 
-    print(f"Recovered {len(markers)} mappings from {args.target_list!r} into {path}")
+    reg_path = registry_path()
+    registry = load_registry(reg_path)
+    recovered = 0
+
+    for calendar, scan in zip(existing_calendars, scans):
+        project = by_title.get(scan.title)
+        # The payload hash is deliberately left unmatchable: the next sync
+        # will rewrite every adopted reminder rather than assume it is
+        # already correct.
+        items = {uuid: StateEntry(identifier, "") for uuid, identifier in scan.marked.items()}
+        if not items and project is None and scan.title != FALLBACK_LIST_TITLE:
+            continue
+
+        if project is not None:
+            state = State(target_list=scan.title, items=items, project_uuid=project.uuid)
+            save_state(project_state_path(project.uuid), state)
+            registry.projects[project.uuid] = RegistryEntry(calendar.calendarIdentifier(), scan.title)
+        elif scan.title == FALLBACK_LIST_TITLE:
+            save_state(inbox_state_path(), State(target_list=scan.title, items=items, project_uuid=None))
+        else:
+            continue
+
+        recovered += len(items)
+
+    save_registry(reg_path, registry)
+    print(f"Recovered {recovered} mappings across {len(existing_calendars)} lists into {reg_path.parent}")
     return 0
 
 

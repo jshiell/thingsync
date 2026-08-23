@@ -4,16 +4,16 @@ from thingsync.protocols import ReminderSink
 
 
 class FakeReminderSink:
-    def scan_markers(self):
+    def resolve_live(self, identifiers):
         return {}
 
-    def resolve_live(self, identifiers):
-        return set()
-
-    def create(self, payload):
+    def create(self, calendar_id, payload):
         return "R1"
 
     def update(self, identifier, payload):
+        pass
+
+    def move(self, identifier, calendar_id, payload):
         pass
 
     def complete(self, identifier):

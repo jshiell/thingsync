@@ -30,18 +30,23 @@ from thingsync.model import ReminderPayload
 
 
 @pytest.fixture
-def live_sink():
-    """A throwaway list, removed again afterwards."""
-    from thingsync.reminders_sink import RemindersSink
+def live_calendar():
+    """A throwaway list, and the sink/manager pair to work on it, removed
+    again afterwards."""
+    from thingsync.reminders_sink import CalendarManager, RemindersSink
 
-    sink = RemindersSink("thingsync-test")
+    sink = RemindersSink()
     sink.request_access()
-    yield sink
-    sink._store.removeCalendar_commit_error_(sink.calendar(), True, None)
+    manager = CalendarManager(sink._store)
+    calendar = manager.create("thingsync-test")
+    yield manager, sink, calendar
+    manager.delete(calendar)
 
 
 @pytest.mark.live
-def test_a_reminder_round_trips_through_create_scan_update_and_complete(live_sink):
+def test_a_reminder_round_trips_through_create_scan_update_and_complete(live_calendar):
+    manager, sink, calendar = live_calendar
+    calendar_id = calendar.calendarIdentifier()
     payload = ReminderPayload(
         title="live round trip",
         notes="Area › Project",
@@ -49,45 +54,69 @@ def test_a_reminder_round_trips_through_create_scan_update_and_complete(live_sin
         due_date=date(2026, 8, 25),
     )
 
-    identifier = live_sink.create(payload)
+    identifier = sink.create(calendar_id, payload)
     assert identifier
 
     # the marker is what makes the reminder findable without the state file
-    assert live_sink.scan_markers() == {"LIVE-UUID": identifier}
-    assert live_sink.resolve_live([identifier]) == {identifier}
+    scans = manager.scan([calendar])
+    assert scans[0].marked == {"LIVE-UUID": identifier}
+    assert sink.resolve_live([identifier]) == {identifier: calendar_id}
 
-    live_sink.update(identifier, ReminderPayload(
+    sink.update(identifier, ReminderPayload(
         title="renamed", notes="", url=marker_url("LIVE-UUID")
     ))
-    assert live_sink._require(identifier).title() == "renamed"
+    assert sink._require(identifier).title() == "renamed"
 
-    live_sink.complete(identifier)
-    assert live_sink._require(identifier).isCompleted()
-    # completed reminders drop out of the scan, so they are never re-adopted
-    assert live_sink.scan_markers() == {}
+    sink.complete(identifier)
+    assert sink._require(identifier).isCompleted()
+    # completed reminders drop out of the incomplete-only marker scan...
+    assert manager.scan([calendar])[0].marked == {}
+    # ...but still count against the foreign-reminder safety check, since
+    # deleting the calendar would delete them too.
+    assert manager.scan([calendar])[0].has_foreign_reminder is False
 
 
 @pytest.mark.live
-def test_a_reminder_without_a_marker_is_invisible_to_the_scan(live_sink):
+def test_a_reminder_without_a_marker_is_foreign_and_invisible_to_the_marker_scan(live_calendar):
     import EventKit
 
-    stranger = EventKit.EKReminder.reminderWithEventStore_(live_sink._store)
-    stranger.setCalendar_(live_sink.calendar())
+    manager, sink, calendar = live_calendar
+    stranger = EventKit.EKReminder.reminderWithEventStore_(sink._store)
+    stranger.setCalendar_(calendar)
     stranger.setTitle_("hand made")
-    live_sink._save(stranger)
+    sink._save(stranger)
 
-    assert live_sink.scan_markers() == {}
+    scan = manager.scan([calendar])[0]
+    assert scan.marked == {}
+    assert scan.has_foreign_reminder is True
 
 
 @pytest.mark.live
-def test_scanning_a_list_that_does_not_exist_does_not_create_it():
-    # --dry-run scans before it decides anything, so scanning must not write.
-    from thingsync.reminders_sink import RemindersSink
+def test_moving_a_reminder_preserves_its_identifier_and_marker(live_calendar):
+    manager, sink, calendar_a = live_calendar
+    calendar_b = manager.create("thingsync-test-b")
+    try:
+        payload = ReminderPayload(title="move me", notes="", url=marker_url("MOVE-UUID"))
+        identifier = sink.create(calendar_a.calendarIdentifier(), payload)
 
-    sink = RemindersSink("thingsync-absent-list")
+        sink.move(identifier, calendar_b.calendarIdentifier(), payload)
+
+        assert sink.resolve_live([identifier]) == {identifier: calendar_b.calendarIdentifier()}
+        assert manager.scan([calendar_a])[0].marked == {}
+        assert manager.scan([calendar_b])[0].marked == {"MOVE-UUID": identifier}
+    finally:
+        manager.delete(calendar_b)
+
+
+@pytest.mark.live
+def test_creating_a_list_does_not_require_scanning_it_first():
+    # --dry-run must never create a list as a side effect of looking at it;
+    # this just proves creation and a fresh scan compose without surprises.
+    from thingsync.reminders_sink import CalendarManager, RemindersSink
+
+    sink = RemindersSink()
     sink.request_access()
+    manager = CalendarManager(sink._store)
 
-    assert sink.scan_markers() == {}
-
-    titles = [c.title() for c in sink._store.calendarsForEntityType_(1)]
-    assert "thingsync-absent-list" not in titles
+    titles_before = [c.title() for c in manager.all_calendars()]
+    assert "thingsync-absent-list" not in titles_before
