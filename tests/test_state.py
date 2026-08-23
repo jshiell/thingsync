@@ -105,3 +105,35 @@ def test_an_explicit_root_still_wins_over_the_environment(monkeypatch, tmp_path)
     monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path / "ignored"))
 
     assert state_path("Things", root=tmp_path).parent == tmp_path
+
+
+from thingsync.state import LegacyStateError, check_for_legacy_state, legacy_state_files
+
+
+def test_an_absent_root_has_no_legacy_files(tmp_path):
+    assert legacy_state_files(tmp_path / "absent") == []
+
+
+def test_an_empty_root_has_no_legacy_files(tmp_path):
+    assert legacy_state_files(tmp_path) == []
+
+
+def test_a_top_level_state_file_is_legacy(tmp_path):
+    (tmp_path / "Things.json").write_text("{}", encoding="utf-8")
+
+    assert [p.name for p in legacy_state_files(tmp_path)] == ["Things.json"]
+
+
+def test_check_for_legacy_state_passes_when_none_is_found(tmp_path):
+    check_for_legacy_state(tmp_path)
+
+
+def test_check_for_legacy_state_names_the_file_and_the_migration_steps(tmp_path):
+    (tmp_path / "Things.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(LegacyStateError) as raised:
+        check_for_legacy_state(tmp_path)
+
+    message = str(raised.value)
+    assert "Things.json" in message
+    assert "Reminders" in message and "delete" in message.lower()

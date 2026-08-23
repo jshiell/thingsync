@@ -122,7 +122,9 @@ def _open_sink(target_list: str):
 
 def sync_command(args, source: TodoSource | None = None) -> int:
     from thingsync.planner import plan
-    from thingsync.state import load, save, state_path
+    from thingsync.state import check_for_legacy_state, load, save, state_path
+
+    check_for_legacy_state()
 
     if source is None:
         from thingsync.things_source import load_todos as source

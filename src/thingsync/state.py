@@ -26,6 +26,26 @@ class StateError(Exception):
     """
 
 
+class LegacyStateError(StateError):
+    """State from the single-list build is present.
+
+    Adopting it silently would mean the per-project scans never look at the old
+    calendar, so every to-do gets recreated fresh in its project list while the
+    old markered copies sit there untouched: permanent duplication delivered by
+    the upgrade itself. Refused until the operator migrates by hand.
+    """
+
+
+LEGACY_MIGRATION_HINT = (
+    "thingsync now mirrors one Reminders list per Things project instead of one "
+    "shared list. To migrate: (1) in the Reminders app, delete the list thingsync "
+    "used to write into; (2) delete the state file(s) named above; (3) re-run "
+    "`thingsync sync` to build fresh per-project lists."
+)
+
+KNOWN_ROOT_FILES: frozenset[str] = frozenset()
+
+
 @dataclass(frozen=True)
 class StateEntry:
     """What we recorded about one mirrored to-do.
@@ -109,3 +129,33 @@ def load(path: Path, target_list: str) -> State:
         raise StateError(f"{path} holds state for list {stored_list!r}, but list {target_list!r} was requested; refusing to apply one list's mappings to another")
 
     return State(target_list=stored_list, items=items)
+
+
+def legacy_state_files(root: Path | None = None) -> list[Path]:
+    """State files left over from the single-list build.
+
+    The per-project layout keeps every state file either under a ``projects/``
+    subdirectory or under one of ``KNOWN_ROOT_FILES``; anything else sitting as
+    JSON directly in the state root predates that and is not eligible for
+    silent adoption.
+    """
+    root = root or state_root()
+    if not root.is_dir():
+        return []
+    return sorted(p for p in root.glob("*.json") if p.name not in KNOWN_ROOT_FILES)
+
+
+def check_for_legacy_state(root: Path | None = None) -> None:
+    """Refuse to run against a single-list state layout.
+
+    Called before anything else in ``sync``, so no per-project code can ever
+    run against state it would silently duplicate.
+    """
+    files = legacy_state_files(root)
+    if not files:
+        return
+    names = ", ".join(path.name for path in files)
+    raise LegacyStateError(
+        f"found old single-list state file(s) in {root or state_root()}: {names}. "
+        f"{LEGACY_MIGRATION_HINT}"
+    )

@@ -181,6 +181,35 @@ def test_bulk_destruction_refusal_stops_before_any_sink_write(monkeypatch, tmp_p
     assert sink.calls == []
 
 
+def test_sync_hard_errors_on_legacy_state_before_touching_things_or_reminders(
+    monkeypatch, tmp_path, capsys
+):
+    # A file left from a *different* list than the one this run targets: it
+    # must still be caught, and must be caught before the current list's own
+    # (perfectly valid) state is even loaded.
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path))
+    (tmp_path / "Scratch.json").write_text(
+        '{"version": 1, "target_list": "Scratch", "items": {}}', encoding="utf-8"
+    )
+
+    def boom():
+        raise AssertionError("Things must not be read once legacy state is found")
+
+    monkeypatch.setattr(things_source, "load_todos", boom)
+
+    def sink_boom(target_list):
+        raise AssertionError("Reminders must not be opened once legacy state is found")
+
+    monkeypatch.setattr(cli, "_open_sink", sink_boom)
+
+    code = cli.main(["sync"])
+
+    assert code == 1
+    error = capsys.readouterr().err
+    assert "Scratch.json" in error
+    assert "migrate" in error.lower()
+
+
 @pytest.mark.parametrize("argv", [["sync"], ["rebuild-state"]])
 def test_main_reports_a_denied_reminders_grant_without_a_traceback(monkeypatch, capsys, tmp_path, argv):
     from thingsync.reminders_sink import RemindersError
