@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 
-from thingsync.model import ThingsTodo
+from thingsync.model import ThingsProject, ThingsTodo
 
 
 def _default_tasks(**kwargs):
@@ -24,6 +24,26 @@ def _default_projects(**kwargs):
     return things.projects(**kwargs)
 
 
+def load_projects(
+    projects: Callable[..., Iterable[Mapping]] | None = None,
+) -> list[ThingsProject]:
+    """Every Things project, regardless of status.
+
+    ``status`` defaults to ``'incomplete'`` in things.py, which would silently
+    drop completed and cancelled projects — exactly the ones whose Reminders
+    list needs to be torn down.
+    """
+    projects = projects or _default_projects
+    return [
+        ThingsProject(
+            uuid=row["uuid"],
+            title=row.get("title") or "",
+            status=row.get("status") or "incomplete",
+        )
+        for row in projects(status=None)
+    ]
+
+
 def load_todos(
     tasks: Callable[..., Iterable[Mapping]] | None = None,
     projects: Callable[..., Iterable[Mapping]] | None = None,
@@ -35,9 +55,16 @@ def load_todos(
     area_of_project = {
         project["uuid"]: project.get("area_title") for project in projects()
     }
+    # status=None: a heading marked complete/cancelled must still resolve the
+    # breadcrumb for any of its to-dos that are themselves still open, or they
+    # would silently misroute into the fallback list.
     heading_parents = {
-        heading["uuid"]: (heading.get("project_title"), area_of_project.get(heading.get("project")))
-        for heading in tasks(type="heading", status="incomplete")
+        heading["uuid"]: (
+            heading.get("project"),
+            heading.get("project_title"),
+            area_of_project.get(heading.get("project")),
+        )
+        for heading in tasks(type="heading", status=None)
     }
 
     rows = tasks(type="to-do", status="incomplete", include_items=True)
@@ -47,10 +74,10 @@ def load_todos(
 
 def _breadcrumb_fields(
     row: Mapping,
-    heading_parents: Mapping[str, tuple[str | None, str | None]],
+    heading_parents: Mapping[str, tuple[str | None, str | None, str | None]],
     area_of_project: Mapping[str, str | None],
-) -> tuple[str | None, str | None, str | None]:
-    """Resolve ``(area, project, heading)`` for one to-do.
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Resolve ``(area, project, heading, project_uuid)`` for one to-do.
 
     things.py sets ``heading_title`` *or* ``project_title`` on a to-do, never
     both, and never sets ``area_title`` on a to-do owned by a project. So the
@@ -58,14 +85,17 @@ def _breadcrumb_fields(
     """
     heading_title = row.get("heading_title")
     if heading_title:
-        project_title, area_title = heading_parents.get(row.get("heading"), (None, None))
-        return area_title, project_title, heading_title
+        project_uuid, project_title, area_title = heading_parents.get(
+            row.get("heading"), (None, None, None)
+        )
+        return area_title, project_title, heading_title, project_uuid
 
     project_title = row.get("project_title")
     if project_title:
-        return area_of_project.get(row.get("project")), project_title, None
+        project_uuid = row.get("project")
+        return area_of_project.get(project_uuid), project_title, None, project_uuid
 
-    return row.get("area_title"), None, None
+    return row.get("area_title"), None, None, None
 
 
 def _outstanding_checklist(row: Mapping) -> tuple[str, ...]:
@@ -83,10 +113,10 @@ def _outstanding_checklist(row: Mapping) -> tuple[str, ...]:
 
 def _to_todo(
     row: Mapping,
-    heading_parents: Mapping[str, tuple[str | None, str | None]],
+    heading_parents: Mapping[str, tuple[str | None, str | None, str | None]],
     area_of_project: Mapping[str, str | None],
 ) -> ThingsTodo:
-    area_title, project_title, heading_title = _breadcrumb_fields(
+    area_title, project_title, heading_title, project_uuid = _breadcrumb_fields(
         row, heading_parents, area_of_project
     )
     return ThingsTodo(
@@ -96,6 +126,7 @@ def _to_todo(
         area_title=area_title,
         project_title=project_title,
         heading_title=heading_title,
+        project_uuid=project_uuid,
         tags=tuple(row.get("tags") or ()),
         checklist=_outstanding_checklist(row),
         deadline=row.get("deadline"),

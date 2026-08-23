@@ -11,12 +11,14 @@ class FakeThings:
         self._headings = list(headings)
         self._projects = list(projects)
         self.calls = []
+        self.project_calls = []
 
     def tasks(self, **kwargs):
         self.calls.append(kwargs)
         return self._headings if kwargs.get("type") == "heading" else self._todos
 
     def projects(self, **kwargs):
+        self.project_calls.append(kwargs)
         return self._projects
 
 
@@ -143,6 +145,93 @@ def test_a_todo_with_no_checklist_or_tags_yields_empty_tuples():
     (todo,) = load_todos(tasks=fake.tasks, projects=fake.projects)
 
     assert todo.tags == () and todo.checklist == ()
+
+
+from thingsync.things_source import load_projects
+
+
+def test_load_projects_asks_for_every_status():
+    # things.py defaults status to 'incomplete', which would silently drop
+    # completed/cancelled projects that still need their list torn down.
+    fake = FakeThings(projects=PROJECTS)
+
+    load_projects(projects=fake.projects)
+
+    assert fake.project_calls[-1]["status"] is None
+
+
+def test_load_projects_yields_things_project_records():
+    fake = FakeThings(
+        projects=[{"uuid": "P1", "title": "Website", "status": "incomplete"}]
+    )
+
+    (project,) = load_projects(projects=fake.projects)
+
+    assert (project.uuid, project.title, project.status) == ("P1", "Website", "incomplete")
+
+
+def test_a_todo_under_a_heading_carries_its_project_uuid():
+    fake = FakeThings(
+        todos=[{"uuid": "U1", "title": "t", "heading": "H1", "heading_title": "Launch"}],
+        headings=HEADINGS,
+        projects=PROJECTS,
+    )
+
+    (todo,) = load_todos(tasks=fake.tasks, projects=fake.projects)
+
+    assert todo.project_uuid == "P1"
+
+
+def test_a_todo_directly_in_a_project_carries_its_project_uuid():
+    fake = FakeThings(
+        todos=[{"uuid": "U1", "title": "t", "project": "P1", "project_title": "Website"}],
+        headings=HEADINGS,
+        projects=PROJECTS,
+    )
+
+    (todo,) = load_todos(tasks=fake.tasks, projects=fake.projects)
+
+    assert todo.project_uuid == "P1"
+
+
+def test_an_unfiled_todo_has_no_project_uuid():
+    fake = FakeThings(todos=[{"uuid": "U1", "title": "t"}])
+
+    (todo,) = load_todos(tasks=fake.tasks, projects=fake.projects)
+
+    assert todo.project_uuid is None
+
+
+def test_a_todo_under_a_completed_heading_still_recovers_its_project_and_area():
+    # A heading query filtered to status='incomplete' would drop this heading
+    # entirely, and the to-do beneath it would misroute into the fallback list.
+    completed_headings = [
+        {"uuid": "H1", "title": "Launch", "project": "P1", "project_title": "Website",
+         "status": "completed"}
+    ]
+    fake = FakeThings(
+        todos=[{"uuid": "U1", "title": "t", "heading": "H1", "heading_title": "Launch"}],
+        headings=completed_headings,
+        projects=PROJECTS,
+    )
+
+    (todo,) = load_todos(tasks=fake.tasks, projects=fake.projects)
+
+    assert (todo.area_title, todo.project_title, todo.heading_title, todo.project_uuid) == (
+        "Work",
+        "Website",
+        "Launch",
+        "P1",
+    )
+
+
+def test_the_heading_query_asks_for_every_status():
+    fake = FakeThings(todos=[], headings=HEADINGS, projects=PROJECTS)
+
+    load_todos(tasks=fake.tasks, projects=fake.projects)
+
+    heading_call = next(c for c in fake.calls if c.get("type") == "heading")
+    assert heading_call["status"] is None
 
 
 @pytest.mark.live
