@@ -146,7 +146,7 @@ def _open_reminders():
 
 def _select_project(projects: list[ThingsProject], name: str) -> ThingsProject | str:
     """The one project named ``name``, or an error message."""
-    matches = [p for p in projects if p.title == name]
+    matches = [p for p in projects if p.title == name and p.status == "incomplete"]
     if not matches:
         return f"no open project named {name!r}"
     if len(matches) > 1:

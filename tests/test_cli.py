@@ -349,6 +349,23 @@ def test_an_ambiguous_project_name_is_a_hard_error_not_a_first_match(monkeypatch
     assert manager.created == []
 
 
+def test_naming_a_closed_project_is_a_hard_error_not_a_crash(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path))
+    manager = FakeManager(calendars=[fallback_calendar()])
+    sink = FakeSink()
+    monkeypatch.setattr(cli, "_open_reminders", lambda: (sink, manager))
+
+    code = cli.sync_command(
+        sync_args(project="Website"),
+        load_todos=lambda: [],
+        load_projects=lambda: [ThingsProject(uuid="P1", title="Website", status="completed")],
+    )
+
+    assert code == 1
+    assert "no open project named" in capsys.readouterr().err
+    assert manager.created == []
+
+
 def test_a_list_deletion_is_refused_and_reported_without_yes(monkeypatch, tmp_path, capsys):
     from thingsync.registry import Registry, RegistryEntry, save as save_registry, registry_path
 
