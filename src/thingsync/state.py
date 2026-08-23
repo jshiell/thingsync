@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-import re
 from pathlib import Path
 
 VERSION = 1
@@ -72,16 +71,6 @@ STATE_DIR_VARIABLE = "THINGSYNC_STATE_DIR"
 def state_root() -> Path:
     """Where state files live, overridable for sandboxes and tests."""
     return Path(os.environ.get(STATE_DIR_VARIABLE) or DEFAULT_ROOT)
-
-
-def state_path(target_list: str, root: Path | None = None) -> Path:
-    """One state file per target list.
-
-    ``--list`` is a per-run flag, so a single global file would let a run against
-    one list leave mappings that a later run applies to a different one.
-    """
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", target_list).strip("._-") or "default"
-    return (root or state_root()) / f"{slug}.json"
 
 
 PROJECTS_SUBDIR = "projects"

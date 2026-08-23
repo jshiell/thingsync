@@ -72,7 +72,7 @@ def test_state_for_a_different_list_is_refused(tmp_path):
     assert "Scratch" in str(raised.value) and "Things" in str(raised.value)
 
 
-from thingsync.state import state_path
+from thingsync.state import project_state_path
 
 
 def test_saving_leaves_no_temporary_files_behind(tmp_path):
@@ -85,26 +85,16 @@ def test_saving_leaves_no_temporary_files_behind(tmp_path):
     assert load(path, target_list="Things").items == {"U2": StateEntry("R2", "h2")}
 
 
-def test_each_target_list_gets_its_own_state_file(tmp_path):
-    assert state_path("Things", root=tmp_path) != state_path("Scratch", root=tmp_path)
-
-
-def test_a_list_name_cannot_escape_the_state_directory(tmp_path):
-    path = state_path("../../etc/passwd", root=tmp_path)
-
-    assert path.parent == tmp_path
-
-
 def test_the_state_directory_can_be_redirected(monkeypatch, tmp_path):
     monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path / "elsewhere"))
 
-    assert state_path("Things").parent == tmp_path / "elsewhere"
+    assert project_state_path("P1").parent == tmp_path / "elsewhere" / "projects"
 
 
 def test_an_explicit_root_still_wins_over_the_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("THINGSYNC_STATE_DIR", str(tmp_path / "ignored"))
 
-    assert state_path("Things", root=tmp_path).parent == tmp_path
+    assert project_state_path("P1", root=tmp_path).parent == tmp_path / "projects"
 
 
 from thingsync.state import LegacyStateError, check_for_legacy_state, legacy_state_files
@@ -145,7 +135,7 @@ def test_the_inbox_state_file_is_never_flagged_as_legacy(tmp_path):
     assert legacy_state_files(tmp_path) == []
 
 
-from thingsync.state import inbox_state_path, project_state_path
+from thingsync.state import inbox_state_path
 
 
 def test_project_state_lives_under_a_projects_subdirectory(tmp_path):
