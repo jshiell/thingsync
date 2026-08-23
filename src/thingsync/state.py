@@ -43,7 +43,7 @@ LEGACY_MIGRATION_HINT = (
     "`thingsync sync` to build fresh per-project lists."
 )
 
-KNOWN_ROOT_FILES: frozenset[str] = frozenset()
+KNOWN_ROOT_FILES: frozenset[str] = frozenset({"_projects.json"})
 
 
 @dataclass(frozen=True)
