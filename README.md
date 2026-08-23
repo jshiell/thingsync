@@ -96,10 +96,18 @@ So durable identity is written **in band**, on the reminder itself:
 reminder.URL = things:///show?id=<things-uuid>
 ```
 
-This survives resync and state-file loss, and doubles as a working deep link back
-into Things — tap it and Things opens the to-do. The state file at
-`~/.local/state/thingsync/<list>.json` is only a fast-path cache; set
-`THINGSYNC_STATE_DIR` to move it.
+This survives state-file loss by construction — the marker is what `rebuild-state`
+scans for — and doubles as a working deep link back into Things — tap it and Things
+opens the to-do. The state file at `~/.local/state/thingsync/<list>.json` is only a
+fast-path cache; set `THINGSYNC_STATE_DIR` to move it.
+
+**Whether the marker itself survives an actual iCloud full resync is unverified.**
+The design assumes it does — that's the whole reason `calendarItemIdentifier` (which
+Apple documents as local and lost on a full sync) isn't the key — but no test here
+triggers a real full resync to confirm the `URL` field survives one. What is verified,
+by an opt-in live test, is the local path: `setURL_` → save → scan-and-recover. Treat
+the resync claim as a design assumption, not a confirmed fact, until it's checked
+against a real resync (see `plan.md`, Increment 0).
 
 Consequences worth knowing:
 
