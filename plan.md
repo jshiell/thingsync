@@ -1,33 +1,31 @@
-# thingsync — one-way mirror from Things 3 to Apple Reminders
+# thingsync — per-project Reminders lists (plan)
 
 ## Context
 
-Things 3 holds the authoritative task list, but Apple Reminders is what's reachable
-from Siri, Apple Watch, CarPlay and shared lists. There is no Things Cloud API, so any
-integration has to work locally on the Mac: read the Things SQLite database, write via
-EventKit.
+Things 3 holds the authoritative task list; Apple Reminders is what's reachable from
+Siri, Apple Watch, CarPlay and shared lists. thingsync is a one-way mirror,
+Things → Reminders, run manually. The single-list version of this is built and
+shipped — see `README.md` for the user-facing contract, permissions, usage and
+limitations. This document is the design plan for the next change: mirroring each
+Things **project** into its own Reminders list, instead of everything into one.
 
-The goal is a **one-way mirror** — Things is the source of truth, Reminders is a
-reflection of it. All open to-dos are mirrored. It runs as a CLI, invoked manually.
-Edits made in Reminders are not read back and will be overwritten on the next run.
+## What already exists
 
-The project directory `/Users/jsh/Projects/thingsync` is currently empty; this is
-greenfield, including `git init`.
+The sections below are a condensed recap of the shipped design, kept only because the
+per-project work extends them directly. Full detail lives in the code and in
+`README.md`; this isn't a duplicate of either.
 
-## Decisions taken
+### Decisions taken
 
 | Decision | Choice |
 |---|---|
 | Direction | One-way, Things → Reminders. Reminders is disposable output. |
 | Scope | All open (incomplete, non-trashed) to-dos. |
-| Trigger | Manual CLI. No launchd agent — see Permissions for why this is not merely deferred packaging. |
-| Stack | Python 3.12 via `uv`/`mise`; `things.py` to read, PyObjC EventKit to write. |
+| Trigger | Manual CLI. No launchd agent — see `README.md` § Permissions for why. |
+| Stack | Python 3.14 via `uv`/`mise`; `things.py` to read, PyObjC EventKit to write. |
 | Identity | Things UUID written **in band** on each reminder; the state file is only a cache. |
 
-## Verified facts (established by spike, 2026-08-22)
-
-These were checked against the real libraries rather than assumed. Anything not listed
-here and not cited to Apple's docs is an assumption.
+### Verified facts (established by spike, 2026-08-22)
 
 | Claim | Result |
 |---|---|
@@ -37,256 +35,242 @@ here and not cited to Apple's docs is an assumption.
 | `things.py` DB path can be redirected for tests | **Yes** — `THINGSDB` environment variable (`things/database.py:36,182`) |
 | `things.py` opens the DB immutably | **No** — `file:{path}?mode=ro`, no `immutable` (`database.py:191`) |
 | `things.py` reuses one connection | **Yes**, one connection built in `__init__`, but each query runs in its own transaction (`with self.connection:`) — so multi-query reads are **not** a single snapshot |
+| A `things:///` URL marker survives `setURL_` → save → refetch, locally | **Yes**, exercised by an opt-in live test (`tests/test_reminders_sink.py`) |
+| That marker survives an actual iCloud full resync | **Unverified** — no test triggers a real resync. Load-bearing for the identity model below; still gating. |
 
-Still unverified, and gating (see Increment 0):
+New spikes for the per-project work append to this table (see Increment 0).
 
-- Whether a custom `things:///` scheme survives `setURL_` → save → refetch, and an
-  iCloud round-trip. **The identity model below depends on this.**
-- Whether a date-only `dueDateComponents` surfaces a notification at the user's all-day
-  reminder time.
-- Whether the Things group container is unreadable without Full Disk Access on this
-  machine (asserted in an earlier session; not re-confirmed).
+### Identity model recap
 
-## Architecture
-
-```
-thingsync/
-  pyproject.toml            # uv-managed, entry point `thingsync`
-  .mise.toml                # pins python + uv
-  src/thingsync/
-    cli.py                  # argparse: sync, doctor, rebuild-state; --dry-run, --list, --on-done, --yes
-    things_source.py        # adapter over things.py -> list[ThingsTodo]
-    reminders_sink.py       # adapter over EventKit -> create/update/complete/lookup/scan
-    model.py                # ThingsTodo, ReminderPayload, SyncAction dataclasses
-    mapping.py              # ThingsTodo -> ReminderPayload field mapping (pure)
-    planner.py              # (todos, state, markers) -> [SyncAction]  (pure, the core)
-    state.py                # load/save JSON state store, atomic write
-  tests/
-```
-
-The two adapters are the only macOS-touching code and sit behind narrow protocols
-(`TodoSource`, `ReminderSink`). `planner.py` and `mapping.py` are pure and carry the
-test weight; adapters are faked in unit tests.
-
-### Identity model — read this before the state store
-
-Apple documents `calendarItemIdentifier` as a *local* identifier: "A full sync with the
-calendar will lose this identifier." iCloud Reminders full-syncs are routine, not
-exotic. It therefore cannot be the durable key.
-
-Composed with a naive "reminder gone → user deleted it → recreate" rule, one iCloud
-resync would recreate every mirrored reminder while the originals remain — and the
-safety rule would then forbid ever cleaning up the orphans, because their identifiers
-are exactly what was lost. Silent, permanent duplication of the whole list.
-
-Durable identity is therefore written **in band**, on the reminder itself:
+Reminder identity is not `calendarItemIdentifier` — Apple documents it as *local*, lost
+on a full iCloud sync — but an in-band marker written on the reminder itself:
 
     reminder.setURL_(NSURL("things:///show?id=<things-uuid>"))
 
-This survives resync and state-file loss, and doubles as a working deep link back into
-Things. `calendarItemIdentifier` is kept in the state file only as a fast-path cache.
-
-**Fallback if Increment 0 shows the URL does not round-trip:** a sentinel final line in
-`notes` (`⟨thingsync:<uuid>⟩`). Uglier and user-visible, but equally durable. Everything
-else in this plan is unchanged by that swap — only `mapping.py` and the sink's scan
-differ.
-
-Lookup order for a known to-do:
-
-1. `calendarItemWithIdentifier:` on the cached id — synchronous, cheap.
-2. On miss, scan the target list for a marker carrying this Things UUID; if found,
-   refresh the cached identifier.
-3. Only if both miss is the reminder genuinely absent → recreate.
-
-Step 2 is what distinguishes "user deleted it" from "identifier rotated". Never
-collapse it into step 3.
-
-### State store
-
-`~/.local/state/thingsync/<target-list>.json` — **one file per target list**, because
-`--list` is a per-run flag and a single global file would let a `--list Scratch` run
-leave mappings that a later default run applies to the wrong list.
-
-```json
-{ "version": 1,
-  "target_list": "Things",
-  "items": { "<things-uuid>": { "reminder_id": "<calendarItemIdentifier — cache only>",
-                                "hash": "<sha256 of payload>" } } }
-```
-
-Rules:
-
-- Written **atomically**: temp file in the same directory, then `os.replace`.
-- Persisted **incrementally** as writes succeed, not once at the end. A crash partway
-  through a first run must not leave created reminders unrecorded.
-- A corrupt or unparseable state file is a **hard error**, never an implicit empty
-  state — "corrupt → start fresh" is the mass-duplication path again. The error names
-  `thingsync rebuild-state`, which reconstructs the mapping by scanning the target list
-  for markers.
-- If `target_list` in the file disagrees with the requested `--list`, refuse and say so.
+Lookup order for a known to-do: (1) the cached `calendarItemIdentifier`, if it still
+resolves; (2) a marker scan of the target list, which is what tells "the user deleted
+it" apart from "iCloud rotated the identifier" — never collapsed into (3); (3) only
+then, create. The state file is a fast-path cache only: losing it is recoverable via
+`thingsync rebuild-state`; corrupting it is a hard error, never a silent "start fresh."
 
 **Safety rule, non-negotiable:** thingsync only ever touches reminders it can *prove*
-are its own — either the identifier is in the state file, or the reminder carries a
-thingsync marker. Hand-made reminders are never modified or deleted, even in the
-target list.
+are its own — cached in the state file, or carrying a marker. Hand-made reminders are
+never modified or deleted, even in a list thingsync owns.
 
-### Field mapping (`mapping.py`)
+### State store recap
+
+One state file per target list today (per project, going forward — see below), written
+atomically (temp file + `os.replace`), persisted incrementally after every action (a
+crash must not leave a created reminder unrecorded). Full rules and JSON shape:
+`state.py`.
+
+### Field mapping recap
 
 | Things | Reminders |
 |---|---|
 | `title` | `title` |
 | `notes` | `notes` body |
-| `area_title` / `project_title` / `heading_title` | breadcrumb prepended to notes (`Area › Project › Heading`). Note the `_title` suffix — bare `area`/`project` are UUIDs. |
-| `tags` | appended to notes as `#tag` text — EventKit has no public tag API |
-| `checklist` | appended to notes as `☐ item` lines — **requires `include_items=True`** |
-| `deadline` (a `'YYYY-MM-DD'` **string**) | `dueDateComponents`, date-only; parse explicitly, there is no direct handoff |
-| `start_date` (When) | `startDateComponents`, date-only |
-| `reminder_time` | **not mapped** in v1 — see limitations |
+| `area_title` / `project_title` / `heading_title` | breadcrumb prepended to notes (`Area › Project › Heading`) |
+| `tags` | appended to notes as `#tag` text |
+| `checklist` | appended to notes as `☐ item` lines |
+| `deadline` | `dueDateComponents`, date-only |
+| `start_date` | `startDateComponents`, date-only |
 | `uuid` | marker: `URL` = `things:///show?id=<uuid>` |
-| Inbox / Anytime / Someday | not mapped; everything lands in one list |
+| Inbox / Anytime / Someday | not mapped — everything currently lands in one list |
 
-**Alarms:** never set `alarms`. `startDateComponents` on its own does not notify —
-alarms are the notification mechanism, so the original no-alarm guard was correct and
-is retained. Whether a date-only `dueDateComponents` additionally surfaces at the
-user's configured all-day reminder time is unconfirmed; Increment 0 checks it, and
-first runs go to a throwaway list regardless.
+That last row is exactly what this plan changes.
 
-### Sync algorithm (`planner.py`)
+### Sync algorithm recap
 
-Inputs: the open Things to-dos, the state, and the set of markers scanned from the
-target list. The scan is passed in, so the planner stays pure and fully testable.
+`planner.plan()`: for each open to-do, resolve via cache → marker scan → create, then
+choose `CREATE` / `ADOPT` (marker found, mapping was stale) / `UPDATE` (hash changed) /
+`SKIP`. For each state entry no longer open, `COMPLETE` or `DELETE` (`--on-done`), or
+`FORGET` if there's nothing left to act on. Destructive actions above a threshold
+require `--yes`. Full detail: `planner.py`.
 
-For each open Things to-do:
+## Per-project Reminders lists
 
-- not in state, no marker in list → **Create**
-- not in state, marker found → **Adopt** (record the mapping, then continue as below)
-- in state, hash changed → **Update**, via the 3-step lookup
-- in state, hash unchanged, lookup resolves → no-op
-- in state, hash unchanged, all three lookup steps miss → **Create**
+Every open Things project gets its own Reminders list, created and renamed
+automatically. This extends the identity model and safety rule above; it does not
+replace them.
 
-For each state entry whose to-do is no longer open in Things (completed, cancelled,
-trashed, or vanished):
+### Decisions taken
 
-- **Complete** the reminder and drop the mapping (default), or **Delete** it with
-  `--on-done delete`.
+| Decision | Choice |
+|---|---|
+| To-dos with no project (Inbox, area-only) | One fixed fallback list, e.g. `Things — Inbox`. |
+| List identity across a project rename | Tracked by the project's Things UUID via a persistent registry, not by title. A rename in Things renames the list in place. |
+| List identity recovery order | Scan the calendar's own contents for this project's markers first; an unambiguous last-known-title match second; `calendarIdentifier` cache is a fast-path only, never sole truth. Unqualified title-only matching was rejected — duplicate Things project titles make it unsound alone (see Known limitations). |
+| A project completed/cancelled/deleted in Things | Its Reminders list is deleted — but only once a full scan (including completed reminders) proves every reminder in it is thingsync's own; any hand-made reminder found refuses the deletion and reports it, every run, until resolved by hand. |
+| CLI surface | `--list` is dropped. `sync` fans out across every open project automatically. `--project NAME` restricts a run to one project's list; a to-do that has since moved out of that project is left alone rather than implicitly widening scope. Ambiguous `--project` names are a hard error, not a silent first match. |
+| Empty projects | Every open project gets a list immediately, even with zero open to-dos. |
+| Declined list deletion | Reported every run — a safety refusal is never silently swallowed — not silenced after the first report. |
+| `--on-done` default | Unchanged (`complete`) inside project lists — no surprise behaviour change; a finished project's list still requires `--yes` to delete regardless. |
 
-If destructive actions (complete + delete) exceed a threshold, require `--yes`. A
-planner bug should not be able to silently clear a list.
+### Why list identity is a harder problem than reminder identity
 
-`--dry-run` prints the action list and writes nothing. This is how the first run should
-always be done.
+`EKReminder` carries a `URL` field, which is what makes the marker in the Identity
+model above possible. `EKCalendar` has no such field — no notes, no URL, nothing to
+carry an in-band marker; its writable surface is `title`, `color`/`cgColor`, and a
+handful of non-identity properties. `color` is technically available as a marker
+channel and was considered and rejected: user-visible, users recolour lists by hand,
+and ~24 bits is a poor identity space.
 
-## Permissions — the fiddly part
+Consequently list identity can only be recovered from two places: the calendar's own
+*contents* (does it hold reminders marked for this project's to-dos? — the same
+computation `rebuild-state` already needs) or its *title*. Contents-based recovery
+covers every case except a genuinely empty list, where title is the only remaining
+signal — and Things permits duplicate project titles, so an unqualified title match is
+unsound as a *first* resort. It is kept only as a last resort, and refuses to adopt
+when more than one candidate list matches.
 
-macOS attributes privacy grants to the **responsible process** — your terminal, not the
-script. Both grants below therefore apply to Terminal/iTerm2 and, by extension, to
-everything you ever run from that terminal. Say this plainly in the README; it is a real
-privilege expansion, not a footnote.
+### New identity flows
 
-1. **Full Disk Access** for the terminal — `~/Library/Group Containers/` is TCC
-   protected, so `JLMPQHK86H.com.culturedcode.ThingsMac/` is unreadable without it.
-   `doctor` establishes this empirically rather than the README asserting it.
-2. **Reminders access** — macOS 14+ requires
-   `requestFullAccessToRemindersWithCompletion:`; `requestAccessToEntityType:completion:`
-   was deprecated in macOS 14.0.
+**Global marker scan.** One `fetchRemindersMatchingPredicate_` call per run, over every
+thingsync-owned calendar at once (the predicate already accepts a calendar array) — not
+one scan per project. This is what makes move-detection possible at all, and it
+collapses what would otherwise be N asynchronous fetches and N permission-adjacent
+calls into one.
 
-**Why there is no launchd agent, and why that is not just packaging:** if the
-responsible process's `Info.plist` lacks `NSRemindersFullAccessUsageDescription`, TCC
-denies **synchronously, with no prompt and no System Settings entry**. Terminals prompt
-normally, so the manual CLI is fine; launchd, cron and ssh contexts are not. A scheduled
-version needs a signed app bundle carrying its own usage strings. Do not plan around
-this being a later flag.
+**Move.** A to-do whose marker is found in a calendar other than its current project's
+list has moved in Things. The planner gains a `MOVE` action (relocate the reminder,
+rewrite its payload) rather than per-list scanning, which could only see a moved-away
+to-do as "gone" (→ complete the old one) and a moved-in to-do as "new" (→ create it
+again) — silently, permanently duplicating it. Gated on a spike: does
+`EKReminder.setCalendar_` plus save actually relocate a reminder while preserving its
+`URL` marker and `calendarItemIdentifier`?
 
-`thingsync doctor`:
+**Calendar-scoped resolution.** `resolve_live`/`_require` currently resolve a cached
+`calendarItemIdentifier` store-wide. Under one list that was a documented, accepted
+limitation (a hand-moved reminder is updated in the wrong list). Under many lists it
+becomes the mechanism by which the mirror rots silently: the id keeps resolving, so
+`UPDATE` is chosen forever instead of `MOVE`. Every resolver becomes calendar-aware.
 
-- Reports Reminders status via `authorizationStatusForEntityType:` — this does **not**
-  prompt.
-- Prints the responsible host process alongside the status, because `notDetermined` and
-  `denied` each have two very different causes (not yet asked vs. host has no usage
-  string; user said no vs. wrong host process). Without this, `doctor` will confidently
-  misdiagnose the one failure it exists to catch.
-- Probes the Things DB by **actually opening it** read-only, not by `os.access`.
-  `things.py` uses `mode=ro` without `immutable`, so a WAL database also needs readable
-  `-shm`/`-wal` files or a writable containing directory — "Things has been launched
-  once" is not the whole precondition.
-- Names the exact System Settings pane for each failure and exits non-zero.
+**Project → list registry**, `~/.local/state/thingsync/_projects.json`:
 
-EventKit note: prefer `calendarItemWithIdentifier:` (synchronous) for cached lookups.
-Only the access request and any full-list fetch need the async completion-handler
-bridge. Decide the `saveReminder:commit:error:` batching policy deliberately in
-Increment 7 — `commit=False` plus one final commit is much faster on a first run but
-changes crash semantics to all-or-nothing per batch, which interacts with the
-incremental-persist rule above.
-
-## Increments (TDD, one commit each)
-
-**0. Spikes — throwaway, explicitly exempt from TDD.** Do not build on unverified
-   premises. Three questions, then delete the code:
-   a. Does `setURL_` with a `things:///` URL round-trip through save → refetch, and
-      through an iCloud sync? Decides marker vs. notes-sentinel.
-   b. Do two reminders with past date-only due dates produce notifications?
-   c. Does the Things container read without Full Disk Access on this machine?
-
-1. `git init`; uv/mise scaffold; `pytest` green with one trivial test.
-2. `doctor`: permission status, host-process identity, DB-openability probe, exit codes.
-   **Moved early deliberately** — this is what stops every later failure being debugged
-   as a code bug.
-3. `model.py` + `mapping.py`: to-do → payload — notes composition, breadcrumb from the
-   `_title` fields, `'YYYY-MM-DD'` parsing, and the marker. Pure tests.
-4. `state.py`: load/save/round-trip, missing file, version handling, **corrupt-file hard
-   error**, and atomic write. Pure tests over `tmp_path`.
-5. `planner.py`: create / adopt / update / skip / complete / recreate against fake state
-   and a fake marker scan. The most test cases live here; the **adopt** path and the
-   **"hash unchanged but lookup missed"** path are the ones that matter.
-6. `things_source.py`: `things.py` → `ThingsTodo`. Point `THINGSDB` at a fixture database
-   — the env override makes this viable without reverse-engineering the schema, and
-   things.py's own repo ships a test DB to start from. Assert `include_items=True` is
-   actually passed. Keep one opt-in live-DB smoke test, skipped by default.
-7. `reminders_sink.py`: EventKit create/update/complete/lookup + marker scan. Document
-   the `commit:` policy.
-8. `cli.py`: `sync --dry-run`, then real `sync`; `rebuild-state`.
-9. `README.md`: permissions setup, the terminal-wide grant caveat, usage, the "Reminders
-   is disposable" contract, limitations.
-
-## Known limitations (state these in the README)
-
-- **Checklists** flatten into notes text. EventKit exposes no public API for nested
-  reminders — verified: `EKReminder` has no `parentReminder`. A private `parentID`
-  exists and is not used.
-- **Tags** become notes text — EventKit has no public tag API.
-- **Repeating to-dos** mirror as the single next instance, with no recurrence rule.
-- **`reminder_time` is not mapped** — a Things to-do with an explicit reminder time
-  loses it.
-- **Reminders-side edits are lost** on the next run. By design.
-- **Un-completing** a to-do in Things creates a fresh reminder; the previously completed
-  one is left in place.
-- A reminder the user **moves to a different list** is still updated in place, in the
-  wrong list.
-- Reading while Things is being actively edited can mix snapshots — tags and checklists
-  are separate queries in separate transactions — which surfaces as a spurious update.
-  Harmless.
-- Things must have been launched at least once on this Mac for the database to exist.
-
-## Verification
-
-```sh
-uv run pytest                                 # unit suite
-uv run thingsync doctor                       # both permissions green
-uv run thingsync sync --dry-run --list Scratch
-uv run thingsync sync --list Scratch          # real run into a throwaway list
+```json
+{ "version": 1,
+  "projects": { "<project-uuid>": { "calendar_id": "<cache>", "title": "<last known>" } } }
 ```
 
-Then, by hand:
+**Per-project to-do state**, keyed by project UUID rather than list title — a title is
+mutable, exactly the thing this project's identity philosophy already refuses to key
+on for reminders. `~/.local/state/thingsync/projects/<project-uuid>.json`, plus one
+fixed `inbox.json`. The existing `state.py` mismatch guard (refusing to apply one
+list's state to another) is kept, but compares `project_uuid`, not the list's current
+title — the prior wording would otherwise hard-error on the very first rename it
+exists to support.
 
-1. Open Reminders — the Scratch list matches the open Things to-dos, with correct due
-   dates and notes breadcrumbs.
-2. Re-run — output shows all skips, no duplicates. The idempotence check.
-3. Complete a to-do in Things, re-run — the matching reminder is completed.
-4. Edit a to-do's title in Things, re-run — updated in place, not duplicated.
-5. Delete a mirrored reminder by hand, re-run — it is recreated.
-6. Create an unrelated reminder by hand in the same list, re-run — it is untouched.
-7. **Delete the state file, re-run — everything is adopted via markers, no duplicates.**
-   This is the identity-model regression check and the single most important manual test.
-8. **Corrupt the state file, re-run — hard error naming `rebuild-state`, nothing written.**
-9. Run with `--list Scratch`, then `--list Other` — the second must start clean, never
-   reuse Scratch's mappings.
+### Deletion — the safety-rule collision
+
+The non-negotiable rule above ("never touch a reminder it can't prove is its own")
+applies to list deletion too: removing an `EKCalendar` removes everything inside it, so
+a project's list is only eligible for deletion once a scan — including completed
+reminders, not just the incomplete ones `scan_markers` already covers — shows zero
+reminders without a thingsync marker. Any foreign reminder refuses the deletion.
+
+List deletion always requires `--yes`, independent of the destructive-action count: it
+is a bigger blast radius than completing one reminder (it also removes thingsync's own
+completed-reminder history for that project, which the default `on_done=complete`
+accumulates). Deletion order is list → its state file → its registry entry, so a crash
+mid-teardown leaves at worst an orphaned state file, never a live markered list with no
+state for a later run to half-adopt.
+
+An implausible deletion — the current project read returning far fewer projects than
+the registry has entries for — refuses all list deletions for that run rather than
+treating "project not read" as "project gone." A failed or partial Things read must
+never look like a mass cancellation, the same principle the state store already applies
+to a corrupt state file.
+
+### Fan-out execution order
+
+Every project (and the fallback bucket) is planned before anything is written: the
+destructive-action gate (`DESTRUCTIVE_THRESHOLD`/`--yes`) runs once, globally, across
+the whole run — gating per project would let a planner bug spread at the threshold
+times the project count. Execution remains incrementally persisted per action once
+gating passes, unchanged from today.
+
+### Migration from the single-list build
+
+Not a documentation footnote: if an old flat list and its state file are simply left in
+place, the new per-project scans never look at that calendar, so every to-do is
+recreated fresh in its project list while the old markered copies sit there untouched
+forever — full, permanent duplication delivered by the upgrade itself. `sync` therefore
+hard-errors on detecting the legacy state-file layout, naming the manual migration
+steps, before any other new-model code can run. This ships as the first increment.
+
+### Breadcrumb
+
+`compose_notes` becomes contextual: `Area › Heading` inside a project's own list (the
+list itself now conveys the project), `Area` only in the fallback list. This changes
+every payload's `content_hash`, so the first sync after this change rewrites every
+reminder once. Harmless, but expected.
+
+### Increments (TDD, one commit each; every increment lands green)
+
+0. **Spikes — throwaway, TDD-exempt.** In one commit, then delete:
+   a. Does `EKReminder.setCalendar_` + save move a reminder between lists, preserving
+      its `URL` marker and `calendarItemIdentifier`?
+   b. Does `predicateForCompletedRemindersWithCompletionDateStarting_ending_calendars_`
+      return completed reminders with `URL()` intact?
+   c. Can `saveCalendar_commit_error_` rename an existing iCloud reminders list in
+      place, and does `removeCalendar_commit_error_` delete one?
+   d. Non-gating: does `EKCalendar.calendarIdentifier` survive a full iCloud resync?
+      Record the result whenever it arrives; contents-based recovery means nothing
+      downstream depends on the answer.
+   Record results in the Verified facts table above.
+1. **Legacy-state hard error.** `sync` refuses to run against the old single-list state
+   layout, naming the migration steps. Ships first so no later commit can duplicate an
+   existing user's list.
+2. `model.py`: `ThingsProject(uuid, title, status)`; `project_uuid` on `ThingsTodo`.
+3. `things_source.py`: `load_projects()` for every project regardless of status;
+   `project_uuid` threaded through the heading path (`heading_parents` must carry the
+   UUID, not just titles); fix the completed-heading hole — a to-do under a *completed*
+   heading currently falls out of `heading_parents` entirely and would misroute into
+   the fallback list.
+4. `mapping.py`: project → list title; fallback-list constant; `compose_notes` takes an
+   `in_project_list` flag.
+5. `registry.py`: the project registry — load/save/round-trip, atomic write,
+   corrupt-file hard error, one versioned storage layout.
+6. `state.py`: re-key by `project_uuid`; fix the mismatch guard to compare UUIDs, not
+   titles, so a title change does not raise.
+7. `projects_planner.py`: pure. `CREATE_LIST` / `RENAME_LIST` / `ADOPT_LIST` /
+   `DELETE_LIST` (guarded) / `KEEP`, given Things projects, the registry, existing
+   calendar titles, and the global marker scan grouped by calendar. Tests cover:
+   duplicate project titles; a hand-made list already holding the project's title;
+   recovery by contents when the cached id is stale; refusal to delete with any
+   foreign reminder present; refusal to delete anything when the project read looks
+   implausibly empty.
+8. `planner.py` + `protocols.py`: add `MOVE`; make `resolve()` calendar-aware; extend
+   `ReminderSink` with `move` and calendar-scoped resolution. Test: a to-do moved
+   project A → B produces exactly one `MOVE`, never `COMPLETE` + `CREATE`.
+9. `reminders_sink.py` + `cli.py`, landed together (splitting `RemindersSink`'s
+   calendar handling changes both call sites, so neither stands alone as green): a
+   `CalendarManager` (enumerate/create/rename/delete, the global marker scan, the
+   completed-reminder scan); `RemindersSink` takes a resolved calendar and gains
+   `move`; `cli.py` drops `--list`/`DEFAULT_LIST`, requests access once, fans out,
+   adds `--project NAME` with ambiguous-name handling, and computes the destructive
+   gate globally before executing anything.
+10. `rebuild-state`: project-aware. Explicitly handles orphan markers (to-do no longer
+    exists in Things), an empty list unattributable to any project, and one project's
+    markers found split across two lists — each named and given a defined, printed
+    resolution rather than a silent pick.
+11. `README.md` + `plan.md`: per-project lists, the contents-first identity model, the
+    fallback list, the deletion guard and its blast radius, the migration hard error.
+
+Given how tightly increments 8–9 depend on each other, treat them as landing together
+if splitting them would leave either half unable to pass the suite on its own —
+consistent with never modifying a passing test to make new code compile, and never
+leaving an increment red.
+
+### Known limitations this design accepts (state these in the README alongside the
+existing ones)
+
+- List identity recovery is weaker than reminder identity recovery: there is no
+  in-band marker field on `EKCalendar`. An identifier rotation on an *empty* list, with
+  no title match either, is genuinely unrecoverable and creates a second list.
+- A user with 100+ open Things projects gets 100+ Reminders lists. Not addressed by
+  this design; flagged as an open product question if it becomes a real problem, not
+  solved speculatively here.
+- `rebuild-state`'s project-grouping cannot attribute a wholly empty mirrored list back
+  to a project; it is left for the operator to resolve by hand.
