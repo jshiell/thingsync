@@ -2,7 +2,7 @@
 name = "thingsync"
 version = "0.1.0"
 description = "One-way mirror from Things 3 to Apple Reminders"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "things.py>=0.0.15",
     "pyobjc-framework-EventKit>=10.3; sys_platform == 'darwin'",

@@ -130,6 +130,7 @@ class _ProcBSDInfo(ctypes.Structure):
     """``struct proc_bsdinfo`` from ``<libproc.h>``, as far as the fields we need."""
 
     _pack_ = 4
+    _layout_ = "ms"
     _fields_ = [
         ("pbi_flags", ctypes.c_uint32),
         ("pbi_status", ctypes.c_uint32),
