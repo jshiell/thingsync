@@ -17,12 +17,12 @@ private struct FakeThingsReader: ThingsReading {
 private let projects = [ThingsProjectRow(uuid: "P1", title: "Website", areaTitle: "Work")]
 private let headings = [ThingsRow(uuid: "H1", title: "Launch", project: "P1", projectTitle: "Website")]
 
-@Test func scalarFieldsComeStraightAcross() {
+@Test func scalarFieldsComeStraightAcross() throws {
     let reader = FakeThingsReader(todos: [
         ThingsRow(uuid: "U1", title: "Buy milk", notes: "2 pints", deadline: "2026-08-25", startDate: "2026-08-20")
     ])
 
-    let todos = loadTodos(reader: reader)
+    let todos = try loadTodos(reader: reader)
 
     #expect(todos.count == 1)
     #expect(todos[0].uuid == "U1")
@@ -37,64 +37,64 @@ private let headings = [ThingsRow(uuid: "H1", title: "Launch", project: "P1", pr
 // the three _title fields therefore cannot produce "Area > Project >
 // Heading", so the chain is resolved here instead.
 
-@Test func aTodoUnderAHeadingRecoversItsProjectAndArea() {
+@Test func aTodoUnderAHeadingRecoversItsProjectAndArea() throws {
     let reader = FakeThingsReader(
         todos: [ThingsRow(uuid: "U1", title: "t", heading: "H1", headingTitle: "Launch")],
         headings: headings, projectRows: projects
     )
 
-    let todos = loadTodos(reader: reader)
+    let todos = try loadTodos(reader: reader)
 
     #expect(todos[0].areaTitle == "Work")
     #expect(todos[0].projectTitle == "Website")
     #expect(todos[0].headingTitle == "Launch")
 }
 
-@Test func aTodoDirectlyInAProjectRecoversItsArea() {
+@Test func aTodoDirectlyInAProjectRecoversItsArea() throws {
     let reader = FakeThingsReader(
         todos: [ThingsRow(uuid: "U1", title: "t", project: "P1", projectTitle: "Website")],
         headings: headings, projectRows: projects
     )
 
-    let todos = loadTodos(reader: reader)
+    let todos = try loadTodos(reader: reader)
 
     #expect(todos[0].areaTitle == "Work")
     #expect(todos[0].projectTitle == "Website")
     #expect(todos[0].headingTitle == nil)
 }
 
-@Test func aTodoSittingStraightInAnAreaKeepsThatArea() {
+@Test func aTodoSittingStraightInAnAreaKeepsThatArea() throws {
     let reader = FakeThingsReader(
         todos: [ThingsRow(uuid: "U1", title: "t", areaTitle: "Home")],
         projectRows: projects
     )
 
-    let todos = loadTodos(reader: reader)
+    let todos = try loadTodos(reader: reader)
 
     #expect(todos[0].areaTitle == "Home")
     #expect(todos[0].projectTitle == nil)
     #expect(todos[0].headingTitle == nil)
 }
 
-@Test func anUnfiledTodoHasNoBreadcrumbAtAll() {
+@Test func anUnfiledTodoHasNoBreadcrumbAtAll() throws {
     let reader = FakeThingsReader(todos: [ThingsRow(uuid: "U1", title: "t")])
 
-    let todos = loadTodos(reader: reader)
+    let todos = try loadTodos(reader: reader)
 
     #expect(todos[0].areaTitle == nil)
     #expect(todos[0].projectTitle == nil)
     #expect(todos[0].headingTitle == nil)
 }
 
-@Test func tagsBecomeAnArray() {
+@Test func tagsBecomeAnArray() throws {
     let reader = FakeThingsReader(todos: [ThingsRow(uuid: "U1", title: "t", tags: ["errand", "urgent"])])
 
-    let todos = loadTodos(reader: reader)
+    let todos = try loadTodos(reader: reader)
 
     #expect(todos[0].tags == ["errand", "urgent"])
 }
 
-@Test func onlyOutstandingChecklistItemsAreMirrored() {
+@Test func onlyOutstandingChecklistItemsAreMirrored() throws {
     // A completed item rendered as "☐ item" would misrepresent it as outstanding.
     let reader = FakeThingsReader(todos: [
         ThingsRow(
@@ -107,24 +107,24 @@ private let headings = [ThingsRow(uuid: "H1", title: "Launch", project: "P1", pr
         )
     ])
 
-    let todos = loadTodos(reader: reader)
+    let todos = try loadTodos(reader: reader)
 
     #expect(todos[0].checklist == ["pack bags", "print tickets"])
 }
 
-@Test func aTodoWithNoChecklistOrTagsYieldsEmptyArrays() {
+@Test func aTodoWithNoChecklistOrTagsYieldsEmptyArrays() throws {
     let reader = FakeThingsReader(todos: [ThingsRow(uuid: "U1", title: "t")])
 
-    let todos = loadTodos(reader: reader)
+    let todos = try loadTodos(reader: reader)
 
     #expect(todos[0].tags == [])
     #expect(todos[0].checklist == [])
 }
 
-@Test func loadProjectsYieldsThingsProjectRecords() {
+@Test func loadProjectsYieldsThingsProjectRecords() throws {
     let reader = FakeThingsReader(projectRows: [ThingsProjectRow(uuid: "P1", title: "Website", status: "incomplete")])
 
-    let result = loadProjects(reader: reader)
+    let result = try loadProjects(reader: reader)
 
     #expect(result.count == 1)
     #expect(result[0].uuid == "P1")
@@ -132,31 +132,31 @@ private let headings = [ThingsRow(uuid: "H1", title: "Launch", project: "P1", pr
     #expect(result[0].status == "incomplete")
 }
 
-@Test func aTodoUnderAHeadingCarriesItsProjectUUID() {
+@Test func aTodoUnderAHeadingCarriesItsProjectUUID() throws {
     let reader = FakeThingsReader(
         todos: [ThingsRow(uuid: "U1", title: "t", heading: "H1", headingTitle: "Launch")],
         headings: headings, projectRows: projects
     )
 
-    #expect(loadTodos(reader: reader)[0].projectUUID == "P1")
+    #expect(try loadTodos(reader: reader)[0].projectUUID == "P1")
 }
 
-@Test func aTodoDirectlyInAProjectCarriesItsProjectUUID() {
+@Test func aTodoDirectlyInAProjectCarriesItsProjectUUID() throws {
     let reader = FakeThingsReader(
         todos: [ThingsRow(uuid: "U1", title: "t", project: "P1", projectTitle: "Website")],
         headings: headings, projectRows: projects
     )
 
-    #expect(loadTodos(reader: reader)[0].projectUUID == "P1")
+    #expect(try loadTodos(reader: reader)[0].projectUUID == "P1")
 }
 
-@Test func anUnfiledTodoHasNoProjectUUID() {
+@Test func anUnfiledTodoHasNoProjectUUID() throws {
     let reader = FakeThingsReader(todos: [ThingsRow(uuid: "U1", title: "t")])
 
-    #expect(loadTodos(reader: reader)[0].projectUUID == nil)
+    #expect(try loadTodos(reader: reader)[0].projectUUID == nil)
 }
 
-@Test func aTodoUnderACompletedHeadingStillRecoversItsProjectAndArea() {
+@Test func aTodoUnderACompletedHeadingStillRecoversItsProjectAndArea() throws {
     // A heading query filtered to status="incomplete" would drop this
     // heading entirely, and the to-do beneath it would misroute into the
     // fallback list.
@@ -166,7 +166,7 @@ private let headings = [ThingsRow(uuid: "H1", title: "Launch", project: "P1", pr
         headings: completedHeadings, projectRows: projects
     )
 
-    let todos = loadTodos(reader: reader)
+    let todos = try loadTodos(reader: reader)
 
     #expect(todos[0].areaTitle == "Work")
     #expect(todos[0].projectTitle == "Website")

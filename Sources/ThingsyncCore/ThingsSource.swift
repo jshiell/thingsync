@@ -94,8 +94,8 @@ public struct ThingsProjectRow: Hashable, Sendable {
 /// unlike things.py there is no cheaper "don't bother with items" mode to
 /// request -- `ThingsRow.checklist` is simply always populated.
 public protocol ThingsReading {
-    func projects(status: ThingsStatus?) -> [ThingsProjectRow]
-    func tasks(type: ThingsTaskType, status: ThingsStatus?) -> [ThingsRow]
+    func projects(status: ThingsStatus?) throws -> [ThingsProjectRow]
+    func tasks(type: ThingsTaskType, status: ThingsStatus?) throws -> [ThingsRow]
 }
 
 private struct HeadingParent {
@@ -158,20 +158,20 @@ private func toTodo(row: ThingsRow, headingParents: [String: HeadingParent], are
 /// A `nil` status filter is deliberate: things.py's own default of
 /// `status="incomplete"` would silently drop completed and cancelled
 /// projects -- exactly the ones whose Reminders list needs tearing down.
-public func loadProjects(reader: ThingsReading) -> [ThingsProject] {
-    reader.projects(status: nil).map { row in
+public func loadProjects(reader: ThingsReading) throws -> [ThingsProject] {
+    try reader.projects(status: nil).map { row in
         ThingsProject(uuid: row.uuid, title: row.title ?? "", status: row.status ?? "incomplete")
     }
 }
 
 /// Every open to-do, with its breadcrumb resolved.
-public func loadTodos(reader: ThingsReading) -> [ThingsTodo] {
+public func loadTodos(reader: ThingsReading) throws -> [ThingsTodo] {
     // Incomplete projects only: this is what makes areaOfProject only know
     // about incomplete projects' areas -- a to-do under a heading in a
     // completed project resolves areaTitle to nil. Preserved quirk, not a
     // bug to fix.
     var areaOfProject: [String: String?] = [:]
-    for row in reader.projects(status: .incomplete) {
+    for row in try reader.projects(status: .incomplete) {
         areaOfProject[row.uuid] = row.areaTitle
     }
 
@@ -179,11 +179,11 @@ public func loadTodos(reader: ThingsReading) -> [ThingsTodo] {
     // the breadcrumb for any of its to-dos that are themselves still open,
     // or they would silently misroute into the fallback list.
     var headingParents: [String: HeadingParent] = [:]
-    for heading in reader.tasks(type: .heading, status: nil) {
+    for heading in try reader.tasks(type: .heading, status: nil) {
         let areaTitle = heading.project.flatMap { areaOfProject[$0] }.flatMap { $0 }
         headingParents[heading.uuid] = HeadingParent(projectUUID: heading.project, projectTitle: heading.projectTitle, areaTitle: areaTitle)
     }
 
-    let rows = reader.tasks(type: .toDo, status: .incomplete)
+    let rows = try reader.tasks(type: .toDo, status: .incomplete)
     return rows.map { toTodo(row: $0, headingParents: headingParents, areaOfProject: areaOfProject) }
 }
