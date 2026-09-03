@@ -22,7 +22,10 @@ let package = Package(
         ),
         .target(
             name: "ThingsyncAdapters",
-            dependencies: ["ThingsyncCore"]
+            dependencies: ["ThingsyncCore"],
+            linkerSettings: [
+                .linkedLibrary("sqlite3")
+            ]
         ),
         .executableTarget(
             name: "thingsync",
