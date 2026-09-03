@@ -1,5 +1,22 @@
 public typealias PersistState = (String?, State) throws -> Void
 
+private let destructiveThreshold = 10
+
+/// Refuse to clear reminders wholesale unless explicitly authorised.
+///
+/// A planner bug or a half-read database should not be able to silently
+/// empty someone's reminders. List deletion has its own, separate gate: it
+/// always needs `--yes`, regardless of how many lists are involved.
+public func refusalForBulkDestruction(_ actions: [SyncAction], assumeYes: Bool) -> String? {
+    if assumeYes { return nil }
+
+    let destructive = destructiveActions(actions)
+    guard destructive.count > destructiveThreshold else { return nil }
+
+    return
+        "\(destructive.count) reminders would be completed or deleted, which is more than the \(destructiveThreshold) allowed without confirmation. Re-run with --dry-run to inspect the plan, or --yes to go ahead."
+}
+
 /// Carry out the reminder-level plan, recording each success before moving
 /// on.
 ///

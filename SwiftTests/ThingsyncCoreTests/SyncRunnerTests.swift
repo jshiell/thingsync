@@ -147,3 +147,21 @@ private let payload = toPayload(ThingsTodo(uuid: "U1", title: "Buy milk"))
     #expect(states["B"]?.items["U1"] == StateEntry(reminderID: "R1", hash: payload.contentHash()))
     #expect(states["A"]?.items["U1"] == nil)
 }
+
+private func manyCompletions(_ count: Int) -> [SyncAction] {
+    (0..<count).map { SyncAction(kind: .complete, uuid: "U\($0)", reminderID: "R\($0)") }
+}
+
+@Test func aHandfulOfCompletionsNeedsNoConfirmation() {
+    #expect(refusalForBulkDestruction(manyCompletions(10), assumeYes: false) == nil)
+}
+
+@Test func wholesaleDestructionIsRefusedWithoutYes() {
+    let refusal = refusalForBulkDestruction(manyCompletions(11), assumeYes: false)
+
+    #expect(refusal?.contains("--yes") == true)
+}
+
+@Test func yesAuthorisesIt() {
+    #expect(refusalForBulkDestruction(manyCompletions(500), assumeYes: true) == nil)
+}
