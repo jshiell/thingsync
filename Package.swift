@@ -23,6 +23,12 @@ let package = Package(
         .target(
             name: "ThingsyncAdapters",
             dependencies: ["ThingsyncCore"],
+            // EventKit's types (EKCalendar, EKReminder, EKEventStore) are not
+            // Sendable, and Swift 6's strict concurrency checking fights the
+            // continuation-based async bridge scan(calendarIDs:) needs (no
+            // fetchReminders(matching:) async overload exists). Pre-authorized
+            // fallback per the port plan rather than a redesign.
+            swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [
                 .linkedLibrary("sqlite3")
             ]
@@ -46,7 +52,8 @@ let package = Package(
         .testTarget(
             name: "ThingsyncAdaptersTests",
             dependencies: ["ThingsyncAdapters"],
-            path: "SwiftTests/ThingsyncAdaptersTests"
+            path: "SwiftTests/ThingsyncAdaptersTests",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )
