@@ -85,6 +85,14 @@ public final class SQLiteStatement {
         sqlite3_bind_text(handle, index, value, -1, sqliteTransient)
     }
 
+    public func bind(_ value: Int, at index: Int32) {
+        sqlite3_bind_int64(handle, index, Int64(value))
+    }
+
+    public func bindNull(at index: Int32) {
+        sqlite3_bind_null(handle, index)
+    }
+
     /// Advances to the next row. Returns false once rows are exhausted.
     @discardableResult
     public func step() throws -> Bool {
