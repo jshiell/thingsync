@@ -102,21 +102,9 @@ private func tempDir() -> URL {
     #expect(try load(from: path, targetList: "Things").items == ["U2": StateEntry(reminderID: "R2", hash: "h2")])
 }
 
-@Test(.serialized) func theStateDirectoryCanBeRedirected() throws {
-    let dir = tempDir()
-    setenv(stateDirEnvironmentVariable, dir.appendingPathComponent("elsewhere").path, 1)
-    defer { unsetenv(stateDirEnvironmentVariable) }
-
-    #expect(projectStatePath("P1").deletingLastPathComponent().path == dir.appendingPathComponent("elsewhere").appendingPathComponent("projects").path)
-}
-
-@Test(.serialized) func anExplicitRootStillWinsOverTheEnvironment() throws {
-    let dir = tempDir()
-    setenv(stateDirEnvironmentVariable, dir.appendingPathComponent("ignored").path, 1)
-    defer { unsetenv(stateDirEnvironmentVariable) }
-
-    #expect(projectStatePath("P1", root: dir).deletingLastPathComponent().path == dir.appendingPathComponent("projects").path)
-}
+// See StateDirectoryEnvironmentTests.swift for the env-var-mutating cases
+// ported from test_the_state_directory_can_be_redirected and
+// test_an_explicit_root_still_wins_over_the_environment.
 
 @Test func anAbsentRootHasNoLegacyFiles() {
     let dir = tempDir()
