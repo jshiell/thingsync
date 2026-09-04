@@ -284,7 +284,11 @@ public final class SyncRunner {
         let inboxState = try load(from: inboxStatePath(), targetList: fallbackListTitle, projectUUID: nil)
         states[nil] = inboxState
         for todoUUID in inboxState.items.keys {
-            stateKeyForUUID[todoUUID] = nil
+            // `stateKeyForUUID[todoUUID] = nil` would remove the key rather
+            // than record "this uuid's project is nil" -- the same
+            // double-optional dictionary trap `ProjectKey` exists to avoid
+            // elsewhere. `updateValue` is the form that actually stores nil.
+            stateKeyForUUID.updateValue(nil, forKey: todoUUID)
         }
 
         for todo in todos {

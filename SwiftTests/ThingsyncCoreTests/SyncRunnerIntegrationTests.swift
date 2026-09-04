@@ -310,6 +310,28 @@ extension StateDirectoryEnvironmentTests {
         #expect(try load(from: registryPath(root: dir)).projects["P1"] == nil)
     }
 
+    @Test func aCompletedInboxTodoIsClosedWithoutCrashing() async throws {
+        let dir = tempStateDir()
+        defer { unsetenv(stateDirEnvironmentVariable) }
+        try save(
+            State(targetList: fallbackListTitle, items: ["U1": StateEntry(reminderID: "R1", hash: "h")], projectUUID: nil),
+            to: inboxStatePath(root: dir)
+        )
+
+        let manager = FakeCalendarManager(calendars: [fallbackCalendar()])
+        let sink = FakeSyncSink(live: ["R1": "INBOX"])
+        let runner = SyncRunner(sink: sink, calendarManager: manager, output: FakeOutput())
+
+        let code = try await runner.run(
+            SyncOptions(),
+            loadTodos: { [] },
+            loadProjects: { [] }
+        )
+
+        #expect(code == 0)
+        #expect(sink.calls == ["complete R1"])
+    }
+
     @Test func syncHardErrorsOnLegacyStateBeforeTouchingThingsOrReminders() async throws {
         let dir = tempStateDir()
         defer { unsetenv(stateDirEnvironmentVariable) }
