@@ -1,30 +1,45 @@
 #!/bin/sh
-# Release-build and sign the thingsync binary, then install it.
+# Release-build, bundle, and sign thingsync, then install it.
 #
-# Signing with a stable identifier is what gives thingsync its own TCC
-# identity instead of inheriting whatever grant its launching terminal has --
-# see plan.md's "Verified facts" for the 2026-08-31/M0.2 spikes this depends
-# on. Re-signing with the same identity after a rebuild must not force a
-# fresh Reminders prompt; `thingsync doctor` after install is how to confirm
-# that held.
+# M0.2 verified (plan.md, "Verified facts", 2026-09-03) that a bare
+# SwiftPM Mach-O with an Info.plist embedded only via -sectcreate does NOT
+# get its own TCC identity: it inherits whatever grant its launching
+# terminal already has. Row 47 of that same table (2026-08-31) confirmed
+# a proper .app bundle with an on-disk Contents/Info.plist does. So the
+# release artifact is a minimal .app bundle, not the bare executable --
+# ~/.local/bin/thingsync is a symlink into it, kept for command-line
+# ergonomics.
+#
+# Two things this script cannot itself verify (no TCC access in a sandboxed
+# build): that the bundle's identity survives being invoked via that
+# symlink rather than the bundle's own path, and that a rebuild + re-sign
+# doesn't force a fresh Reminders prompt. Run `thingsync doctor` after
+# install to check the first; rebuild and run it again to check the second.
 set -eu
 
 cd "$(dirname "$0")/.."
 
 SIGNING_IDENTITY="thingsync local signer"
 BUNDLE_ID="org.infernus.thingsync"
-INSTALL_DIR="${HOME}/.local/bin"
+APP_DIR="${THINGSYNC_APP_DIR:-${HOME}/Applications/Thingsync.app}"
+INSTALL_DIR="${THINGSYNC_INSTALL_DIR:-${HOME}/.local/bin}"
 
 swift build -c release --disable-sandbox
+
+rm -rf "${APP_DIR}"
+mkdir -p "${APP_DIR}/Contents/MacOS"
+cp .build/release/thingsync "${APP_DIR}/Contents/MacOS/thingsync"
+cp Resources/Info.plist "${APP_DIR}/Contents/Info.plist"
 
 codesign --force \
     --sign "${SIGNING_IDENTITY}" \
     --identifier "${BUNDLE_ID}" \
     --options runtime \
-    .build/release/thingsync
+    "${APP_DIR}"
 
 mkdir -p "${INSTALL_DIR}"
-cp .build/release/thingsync "${INSTALL_DIR}/thingsync"
+ln -sf "${APP_DIR}/Contents/MacOS/thingsync" "${INSTALL_DIR}/thingsync"
 
-echo "Installed to ${INSTALL_DIR}/thingsync"
-echo "Run \`thingsync doctor\` to confirm permissions survived the rebuild."
+echo "Installed ${APP_DIR}"
+echo "Symlinked ${INSTALL_DIR}/thingsync -> it"
+echo "Run \`thingsync doctor\` -- the responsible host should now be thingsync itself, not your terminal."

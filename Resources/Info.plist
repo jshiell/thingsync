@@ -4,6 +4,10 @@
 <dict>
 	<key>CFBundleIdentifier</key>
 	<string>org.infernus.thingsync</string>
+	<key>CFBundleExecutable</key>
+	<string>thingsync</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
 	<key>CFBundleName</key>
 	<string>thingsync</string>
 	<key>CFBundleVersion</key>
