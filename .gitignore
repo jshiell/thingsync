@@ -1,11 +1,2 @@
-__pycache__/
-*.py[cod]
-.venv/
-.pytest_cache/
-dist/
-build/
 .build/
-*.egg-info/
-.pythons/
 .state/
-plan.md.orig
