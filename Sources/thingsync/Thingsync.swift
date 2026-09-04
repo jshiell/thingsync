@@ -13,6 +13,24 @@ struct Thingsync: AsyncParsableCommand {
         abstract: "One-way mirror from Things 3 to Apple Reminders.",
         subcommands: [DoctorCommand.self, SyncCommand.self, RebuildStateCommand.self]
     )
+
+    // Temporary, for M5.14's differential check against things.py -- remove
+    // once that check has passed and Python is deleted (plan.md M9.5).
+    @Flag(name: .customLong("dump-things-json"), help: .hidden)
+    var dumpThingsJSON = false
+
+    func run() async throws {
+        guard dumpThingsJSON else {
+            throw CleanExit.helpRequest(self)
+        }
+        let database = try ThingsDatabase(path: thingsDatabasePath())
+        let dump = ThingsJSONDump(
+            todos: try loadTodos(reader: database).map(ThingsTodoDump.init),
+            projects: try loadProjects(reader: database).map(ThingsProjectDump.init)
+        )
+        let data = try JSONEncoder().encode(dump)
+        print(String(decoding: data, as: UTF8.self))
+    }
 }
 
 struct DoctorCommand: AsyncParsableCommand {
