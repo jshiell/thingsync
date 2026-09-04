@@ -18,7 +18,7 @@ only for the reasoning that doesn't belong in either the code or the README.
 | Direction | One-way, Things → Reminders. Reminders is disposable output. |
 | Scope | All open (incomplete, non-trashed) to-dos. |
 | Trigger | Manual CLI. No launchd agent — see `README.md` § Permissions for why. |
-| Stack | Python 3.14 via `uv`/`mise`; `things.py` to read, PyObjC EventKit to write. |
+| Stack | Native Swift (Swift Package Manager, `.macOS(.v14)`); a direct SQLite reader (reverse-engineered from `things.py`'s own schema and queries, since Things' schema itself isn't documented anywhere else) to read, EventKit to write. Originally Python 3.14 via `uv`/`mise` with `things.py`/PyObjC; ported for distribution and to remove the main obstacle to a future background agent (see Context, and `README.md`'s Development section). |
 | Identity (reminder) | Things UUID written **in band** on each reminder; the state file is only a cache. |
 | Identity (list) | Tracked by the project's Things UUID via a persistent registry, not by title. A rename in Things renames the list in place. |
 | List identity recovery order | Scan the calendar's own contents for this project's markers first; an unambiguous last-known-title match second; `calendarIdentifier` cache is a fast-path only, never sole truth. |

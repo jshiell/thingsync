@@ -26,12 +26,19 @@ This is worth understanding before you run it.
 
 ## Install
 
-Requires macOS and Things 3 (launched at least once, so its database exists).
+Requires macOS 14+ and Things 3 (launched at least once, so its database exists).
 
 ```sh
-mise install          # python 3.12 + uv
-uv sync
+./scripts/build-and-sign.sh   # builds, code-signs, and installs to ~/.local/bin/thingsync
 ```
+
+Needs a self-signed code-signing identity named `thingsync local signer` in
+your keychain (Keychain Access → Certificate Assistant → Create a Certificate
+→ type "Code Signing" → "Let me override defaults" so it's marked trusted for
+code signing — created once, see `scheduled-task-work.md`). Signing with a
+stable identity means a later rebuild doesn't force a fresh Reminders prompt.
+It does *not* give thingsync its own TCC identity separate from the terminal
+you run it from — see Permissions below.
 
 ## Permissions
 
@@ -56,7 +63,7 @@ the app that launched the script.
 Check both at any time:
 
 ```sh
-uv run thingsync doctor
+thingsync doctor
 ```
 
 `doctor` reports each grant, names the responsible host process alongside it, and
@@ -71,8 +78,8 @@ a different app".
 Always do the first run dry:
 
 ```sh
-uv run thingsync sync --dry-run   # print the plan for every project, write nothing
-uv run thingsync sync             # do it — creates one list per open project
+thingsync sync --dry-run   # print the plan for every project, write nothing
+thingsync sync             # do it — creates one list per open project
 ```
 
 | Flag | Effect |
@@ -85,8 +92,8 @@ uv run thingsync sync             # do it — creates one list per open project
 Other commands:
 
 ```sh
-uv run thingsync doctor          # check permissions
-uv run thingsync rebuild-state   # reconstruct the registry and every state file from Reminders
+thingsync doctor          # check permissions
+thingsync rebuild-state   # reconstruct the registry and every state file from Reminders
 ```
 
 ## How identity survives
@@ -117,7 +124,7 @@ Apple documents as local and lost on a full sync) isn't the key — but no test 
 triggers a real full resync to confirm the `URL` field survives one. What is verified,
 by an opt-in live test, is the local path: `setURL_` → save → scan-and-recover. Treat
 the resync claim as a design assumption, not a confirmed fact, until it's checked
-against a real resync (see `plan.md`, Increment 0).
+against a real resync (see `plan.md`'s "Verified facts" table).
 
 Consequences worth knowing:
 
@@ -215,17 +222,30 @@ a flag.
 ## Development
 
 ```sh
-uv run pytest            # unit suite; adapters are faked
-uv run pytest -m live    # opt-in, touches the real Things DB and Reminders
+swift build -c release && swift test   # the verify gate; see AGENTS.md
+swift test --disable-sandbox           # under nono or another nested sandbox
+
+THINGSYNC_LIVE=1 swift test --filter ThingsyncAdaptersTests   # opt-in, touches the real Things DB and Reminders
 ```
 
-`planner.py`, `projects_planner.py`, `mapping.py`, `state.py` and `registry.py`
-are pure and carry the test weight. `things_source.py` and `reminders_sink.py`
-are the only macOS-touching modules — the latter splits into `CalendarManager`
+`Planner.swift`, `ProjectsPlanner.swift`, `Mapping.swift`, `State.swift` and
+`Registry.swift` (all in `Sources/ThingsyncCore`) are pure and carry the test
+weight. `Sources/ThingsyncAdapters` holds the only two things that touch the
+OS: `ThingsDatabase.swift` (a direct SQLite reader, reverse-engineered from
+`things.py`'s own schema and queries — see `plan.md`'s M5 section) and
+`EventKitRemindersStore.swift`, which splits into `EventKitCalendarManager`
 (enumerate/create/rename/delete lists, and scan their contents) and
-`RemindersSink` (create/update/move/complete/delete one reminder, given an
-already-resolved calendar).
+`EventKitRemindersStore` (create/update/move/complete/delete one reminder,
+given an already-resolved calendar).
 
-Writes commit one at a time (`commit=True`) rather than batching. Batching is
+Writes commit one at a time (`commit: true`) rather than batching. Batching is
 faster on a first run but makes a batch all-or-nothing, which contradicts the
 rule that state is persisted incrementally as each write succeeds.
+
+thingsync was originally written in Python and ported to Swift for
+distribution (no `mise`/`uv`/venv setup) and to remove the main practical
+obstacle to a future resident-process background agent (see `plan.md` for
+the full rationale, and why that's not the same as solving it). The port was
+a strict one-to-one translation with no behaviour changes; `plan.md` has the
+full milestone-by-milestone record, including the empirically-verified
+platform facts it depends on.
