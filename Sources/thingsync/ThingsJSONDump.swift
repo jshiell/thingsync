@@ -32,6 +32,30 @@ struct ThingsTodoDump: Encodable {
         deadline = todo.deadline
         start_date = todo.startDate
     }
+
+    // The synthesized conformance uses encodeIfPresent for Optionals, which
+    // omits the key entirely when nil -- dataclasses.asdict()/json.dumps()
+    // on the Python side always includes the key with an explicit `null`.
+    // Encoding explicitly here (rather than IfPresent) keeps the two dumps
+    // diffable key-for-key.
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(uuid, forKey: .uuid)
+        try container.encode(title, forKey: .title)
+        try container.encode(notes, forKey: .notes)
+        try container.encode(area_title, forKey: .area_title)
+        try container.encode(project_title, forKey: .project_title)
+        try container.encode(heading_title, forKey: .heading_title)
+        try container.encode(project_uuid, forKey: .project_uuid)
+        try container.encode(tags, forKey: .tags)
+        try container.encode(checklist, forKey: .checklist)
+        try container.encode(deadline, forKey: .deadline)
+        try container.encode(start_date, forKey: .start_date)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case uuid, title, notes, area_title, project_title, heading_title, project_uuid, tags, checklist, deadline, start_date
+    }
 }
 
 struct ThingsProjectDump: Encodable {
