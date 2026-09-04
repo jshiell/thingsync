@@ -27,6 +27,11 @@ codesign --force \
     .build/release/thingsync
 
 mkdir -p "${INSTALL_DIR}"
+# rm first, not just cp: a stale symlink here (e.g. from the abandoned
+# .app-bundle packaging attempt) would make cp write through it to a
+# target whose directory no longer exists, failing with a confusing
+# "No such file or directory".
+rm -f "${INSTALL_DIR}/thingsync"
 cp .build/release/thingsync "${INSTALL_DIR}/thingsync"
 
 echo "Installed to ${INSTALL_DIR}/thingsync"
