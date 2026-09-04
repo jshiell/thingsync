@@ -162,7 +162,11 @@ private let checklistItemsForTaskSQL = """
 /// One connection per instance, opened lazily; each query its own implicit
 /// transaction, matching things.py exactly -- multi-query reads are *not*
 /// a single consistent snapshot.
-public final class ThingsDatabase: ThingsReading {
+/// `@unchecked Sendable`: a CLI has one thread of control, so this is never
+/// actually accessed concurrently -- only ever captured across the
+/// MainActor/nonisolated boundary between the executable's command and
+/// `SyncRunner`/`RebuildStateRunner`.
+public final class ThingsDatabase: ThingsReading, @unchecked Sendable {
     private let connection: SQLiteConnection
 
     public init(path: String) throws {
